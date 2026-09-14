@@ -1,0 +1,39 @@
+# Fixed tag vocabulary. Injected into the Gemini response schema as an enum,
+# so the model physically cannot emit a tag that is not on this list.
+#
+# The `when` line is injected into the prompt to steer selection. Keep it short
+# and disjoint from the others — overlapping descriptions are what cause drift.
+#
+# Editing: change this file, then restart the worker (it is read at startup).
+# Bump PROMPT_VERSION in src/sme/extractor.py whenever you change the vocabulary,
+# so you can tell which notes were tagged under which version.
+version: 1
+tags:
+  - name: ads
+    when: Paid advertising. Creative testing, targeting, budget, bidding, ad managers.
+  - name: personal-brand
+    when: Building an individual's audience, positioning, or authority.
+  - name: copywriting
+    when: The words themselves. Headlines, body copy, CTAs, email subject lines.
+  - name: offer-design
+    when: What is being sold and how it is packaged. Pricing, bonuses, guarantees.
+  - name: funnels
+    when: Multi-step conversion paths. Landing pages, lead magnets, email sequences.
+  - name: content-strategy
+    when: What to post, how often, on which platform, and why.
+  - name: hooks-scripting
+    when: The first three seconds. Hook formulas, retention structure, video scripting.
+  - name: analytics
+    when: Measurement. Metrics, attribution, dashboards, interpreting numbers.
+  - name: automation
+    when: Tooling that removes manual work. Workflows, integrations, AI pipelines.
+  - name: sales
+    when: One-to-one conversion. DM scripts, calls, objection handling, closing.
+  - name: tooling
+    when: A specific named product or app is the subject of the reel.
+  - name: mindset
+    when: Motivation, discipline, identity, general life advice. No executable tactic.
+  - name: low-signal
+    when: Nothing usable. Pure engagement bait, an ad for a course, or unintelligible.
+  - name: inbox
+    when: Genuinely useful but fits none of the above. Needs a human to file it.
