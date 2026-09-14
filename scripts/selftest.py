@@ -25,7 +25,7 @@ os.environ.update(
     GEMINI_API_KEY="fake", COOKIES_PATH=str(tmp / "cookies.txt"),
     TAGS_FILE=str(REPO / "config" / "tags.yml"), GIT_REMOTE="",
     # the real gate is 90s between downloads; this test is about policy, not pacing
-    DOWNLOAD_MIN_INTERVAL_S="0", DOWNLOAD_DAILY_CAP="1000",
+    DOWNLOAD_MIN_INTERVAL_S=os.environ.get("SELFTEST_INTERVAL","0"), DOWNLOAD_DAILY_CAP="1000",
 )
 
 from sme import worker as W  # noqa: E402
@@ -113,6 +113,12 @@ w.run(once=True)
 row = q.get("BBB22222")
 ok(row["status"] == "retry" and row["attempts"] == 1, "transient error schedules a retry")
 ok(q.claim_next() is None, "backoff prevents an immediate re-claim")
+# Park BBB beyond any plausible run duration. Without this the assertions below
+# depend on how long the rate-limit gate sleeps: once BBB's backoff elapses it is
+# the oldest runnable job and correctly starves the newer ones, which is right in
+# production and useless in a test.
+q._conn.execute("UPDATE jobs SET next_attempt_at=? WHERE shortcode='BBB22222'",
+                (iso(utcnow() + timedelta(days=1)),))
 
 # 4. deleted reel is skipped permanently
 _behaviour["download"] = "gone"

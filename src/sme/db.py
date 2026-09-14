@@ -98,7 +98,10 @@ class Queue:
             row = c.execute(
                 "SELECT * FROM jobs WHERE status='queued'"
                 "    OR (status='retry' AND (next_attempt_at IS NULL OR next_attempt_at <= ?))"
-                " ORDER BY created_at LIMIT 1",
+                # rowid breaks created_at ties: it is stored at second resolution,
+                # so reels shared in the same second would otherwise have no
+                # defined order. rowid is insertion order, which is what FIFO means.
+                " ORDER BY created_at, rowid LIMIT 1",
                 (now,),
             ).fetchone()
             if row is None:
