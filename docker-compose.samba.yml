@@ -1,0 +1,26 @@
+# Optional: expose the vault as an SMB share so you can open it from any machine
+# on the LAN — \\<homelab-ip>\reel-vault on Windows, smb://<homelab-ip>/reel-vault
+# on macOS/Linux.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.samba.yml up -d
+#
+# Requires SMB_PASSWORD in the stack environment. Port 445 must be free — if the
+# host already runs Samba, stop it or remap the port.
+services:
+  samba:
+    image: dperson/samba
+    container_name: sme-samba
+    restart: unless-stopped
+    ports:
+      - "139:139"
+      - "445:445"
+    environment:
+      TZ: ${TZ:-UTC}
+    # -s "name;path;browseable;readonly;guest;users"   -u "user;password"
+    # readonly=no because Obsidian writes (.obsidian/, edits, new notes).
+    command: >
+      -s "reel-vault;/vault;yes;no;no;${SMB_USER:-reel}"
+      -u "${SMB_USER:-reel};${SMB_PASSWORD}"
+      -p
+    volumes:
+      - ${VAULT_DIR:-/srv/reel-vault}:/vault

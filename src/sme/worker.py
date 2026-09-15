@@ -22,7 +22,7 @@ from .downloader import PAUSING, DownloadError, download
 from .extractor import PROMPT_VERSION, ExtractionError, available_models, extract
 from .notify import send
 from .render import note_filename, render, write_note
-from .vault import commit_note, ensure_repo, push
+from .vault import chown_path, commit_note, ensure_repo, push
 
 log = logging.getLogger("sme.worker")
 
@@ -63,6 +63,8 @@ class Worker:
             author_name=cfg.git_author_name,
             author_email=cfg.git_author_email,
             remote=cfg.git_remote,
+            uid=cfg.vault_uid,
+            gid=cfg.vault_gid,
         )
 
     # --- notification -----------------------------------------------------
@@ -153,6 +155,7 @@ class Worker:
             published_at=dl.published_at,
         )
         note = write_note(self.cfg.notes_dir, note_filename(now, dl.uploader, sc), content)
+        chown_path(note, self.cfg.vault_uid, self.cfg.vault_gid)
 
         commit_note(self.cfg.vault_dir, note, f"capture: @{dl.uploader} {sc}")
         if self.cfg.git_remote:

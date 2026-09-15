@@ -129,7 +129,7 @@ recreating the stack.
 
 | Volume        | Mounted at | Holds                                                                 |
 | ------------- | ---------- | --------------------------------------------------------------------- |
-| `sme_data`    | `/data`    | `queue.db`, `media/` (30-day), `vault/` (the git repo and your notes) |
+| `sme_data`    | `/data`    | `queue.db` and `media/` (30-day). The vault is a host folder — Part 11 |
 | `sme_secrets` | `/secrets` | `cookies.txt` only                                                    |
 
 ---
@@ -476,10 +476,124 @@ docker run --rm -v sme_data:/data -v /tmp:/out alpine \
 | Notes appear but transcript is empty                            | Reel has no speech                            | Check `on_screen_text` — that is where the content is                                                                             |
 | `git` errors about "dubious ownership"                          | Volume uid mismatch                           | Already handled via `safe.directory`; if it recurs, `docker exec sme-worker git config --global --add safe.directory /data/vault` |
 | Stack deploy fails immediately                                  | Volumes not created                           | Part 4 — both `sme_data` and `sme_secrets` must exist first                                                                       |
+| Vault looks empty after switching to `VAULT_DIR` | Bind mount shadowed the volume copy | Part 11a — stop the stack, copy the old vault out, redeploy |
+| New notes are owned by `root` | `VAULT_UID`/`VAULT_GID` unset | Set them to your `id -u` / `id -g` and update the stack |
+| SMB share will not start | Port 445 already in use on the host | Stop the host's Samba, or remap the port in `docker-compose.samba.yml` |
 | Deploy fails with `[object Object]` | Portainer swallowing the real error | Part 5c — reproduce over SSH to see it |
 | Deploy dies mid-`apt-get` after minutes | Building on the homelab | Part 5a — pull the prebuilt image instead |
 | `ERROR: ... ffmpeg is not installed` | Source needs stream merging | Rebuild with `WITH_FFMPEG=true` (`docker-compose.build.yml`) |
 | `WARN ffmpeg installed (optional)` | Expected | Formats are pinned to pre-muxed; nothing to merge |
+
+---
+
+## Part 11 — Make the vault a readable folder
+
+By default the vault lived inside the `sme_data` Docker volume, at
+`/var/lib/docker/volumes/sme_data/_data/vault` — readable only through
+`docker exec` or `sudo`. It is now a plain host folder instead.
+
+`queue.db` and `media/` stay in `sme_data`. Only the vault moves, because it is
+the only part you ever want to open yourself.
+
+### 11a. Migrate (once, and in this order)
+
+> The bind mount **shadows** whatever is already at `/data/vault` in the volume.
+> Copy first or your existing notes vanish from view. They are not deleted — they
+> are still in the volume — but the worker will start from an empty vault and
+> your git history will not follow you.
+
+Over SSH on the homelab:
+
+```bash
+# 1. Stop the stack first, so nothing writes mid-copy.
+#    Portainer → Stacks → sme → Stop, or:
+docker stop sme-worker sme-bot
+
+# 2. Create the folder, owned by you.
+sudo mkdir -p /srv/reel-vault
+sudo chown "$(id -u):$(id -g)" /srv/reel-vault
+
+# 3. Copy the existing vault out of the volume. The trailing /. matters —
+#    it copies the contents including the .git directory.
+sudo cp -a /var/lib/docker/volumes/sme_data/_data/vault/. /srv/reel-vault/
+sudo chown -R "$(id -u):$(id -g)" /srv/reel-vault
+
+# 4. Verify BEFORE you redeploy: notes present, git history intact.
+ls /srv/reel-vault/reels | head
+git -C /srv/reel-vault log --oneline | head
+```
+
+If step 4 shows your notes and your commits, the copy is good.
+
+Then in Portainer → Stacks → `sme` → Environment variables, add:
+
+```
+VAULT_DIR=/srv/reel-vault
+VAULT_UID=1000
+VAULT_GID=1000
+```
+
+Use your real values from `id -u` and `id -g`. They make new notes owned by you
+rather than root, which is what lets you edit them without `sudo`.
+
+**Update the stack**, then share a reel and confirm it lands on the host:
+
+```bash
+ls -la /srv/reel-vault/reels | tail -3
+```
+
+New files should show your username, not `root`.
+
+### 11b. Reading it from another machine
+
+| Option | Good for | Cost |
+|---|---|---|
+| **SMB share** | Opening the vault from a desktop on the LAN, including in Obsidian | One extra container |
+| **Syncthing** | A real local copy per device. The right answer for Obsidian on a phone | A daemon on each device |
+| **Git remote** | Durability, history, and reading the vault from a Claude session | Free; it is milestone M3 |
+
+They compose — SMB for the desktop, git for backup and Claude.
+
+#### SMB
+
+Add `SMB_PASSWORD=<something>` to the stack environment, then deploy with the
+overlay:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.samba.yml up -d
+```
+
+In Portainer, add `docker-compose.samba.yml` to the stack's compose path list,
+or paste the merged file. Then connect:
+
+- Windows: `\\<homelab-ip>\reel-vault`
+- macOS / Linux: `smb://<homelab-ip>/reel-vault`
+- User `reel` (or `SMB_USER`), password `SMB_PASSWORD`
+
+The share is writable, because Obsidian writes `.obsidian/` and your edits.
+Port 445 must be free — if the homelab already runs Samba, stop it or remap.
+
+#### Obsidian
+
+Point Obsidian at the folder — the SMB mount, or the Syncthing copy. Obsidian
+over SMB works but is happier with a local folder, so prefer Syncthing if you
+intend to edit heavily or use mobile.
+
+The notes are already Obsidian-shaped: YAML frontmatter, `tags:` as a real list,
+flat `reels/` directory. Tag search (`tag:#ads`) works with no configuration.
+
+> Editing notes by hand is fine — but leave the frontmatter alone. `shortcode`,
+> `prompt_version` and `tag_vocab_version` are how you find stale notes after the
+> extraction prompt changes. Edit the body freely.
+
+### 11c. Backup
+
+The vault is a git repo, so once `GIT_REMOTE` is set (M3) pushing is the backup.
+Until then:
+
+```bash
+tar czf ~/reel-vault-$(date +%F).tar.gz -C /srv reel-vault
+```
 
 ---
 

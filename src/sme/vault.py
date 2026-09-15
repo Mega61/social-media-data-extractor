@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 log = logging.getLogger("sme.vault")
 
@@ -17,8 +19,38 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
     return proc
 
 
+def chown_tree(path: Path, uid: Optional[int], gid: Optional[int]) -> None:
+    """Hand ownership of the vault to a real host user.
+
+    The container writes as root. On a bind-mounted vault that leaves every note
+    root-owned, which reads fine but blocks editing from the host or over Samba —
+    and Obsidian wants to write (.obsidian/, edits). No-op when unset.
+    """
+    if uid is None or gid is None:
+        return
+    try:
+        for root, dirs, files in os.walk(path):
+            for name in dirs + files:
+                try:
+                    os.chown(os.path.join(root, name), uid, gid)
+                except (PermissionError, FileNotFoundError):
+                    pass
+        os.chown(path, uid, gid)
+    except (PermissionError, FileNotFoundError) as e:
+        log.warning("could not chown vault to %s:%s (%s)", uid, gid, e)
+
+
+def chown_path(path: Path, uid: Optional[int], gid: Optional[int]) -> None:
+    if uid is None or gid is None:
+        return
+    try:
+        os.chown(path, uid, gid)
+    except (PermissionError, FileNotFoundError):
+        pass
+
+
 def ensure_repo(repo: Path, *, branch: str, author_name: str, author_email: str,
-                remote: str = "") -> None:
+                remote: str = "", uid: Optional[int] = None, gid: Optional[int] = None) -> None:
     repo.mkdir(parents=True, exist_ok=True)
     if not (repo / ".git").exists():
         _git(repo, "init", "-b", branch)
@@ -42,6 +74,7 @@ def ensure_repo(repo: Path, *, branch: str, author_name: str, author_email: str,
             "Notes live in `reels/`. Do not hand-edit frontmatter.\n",
             encoding="utf-8",
         )
+    chown_tree(repo, uid, gid)
 
 
 def commit_note(repo: Path, note_path: Path, message: str) -> bool:

@@ -7,6 +7,10 @@
 #   Volumes → Add volume → name: sme_data     → Create the volume
 #   Volumes → Add volume → name: sme_secrets  → Create the volume
 #
+# The vault lives at VAULT_DIR on the host (default /srv/reel-vault) so the
+# markdown is directly readable. Set VAULT_UID/VAULT_GID to your own `id -u`/
+# `id -g` so the notes are yours, not root's.
+#
 # /secrets is mounted read-write on purpose: it lets you refresh the Instagram
 # cookie by sending cookies.txt to the Telegram bot, with no SSH and no redeploy.
 name: sme
@@ -30,11 +34,18 @@ x-common: &common
     GIT_AUTHOR_EMAIL: ${GIT_AUTHOR_EMAIL:-reel-bot@localhost}
     DATA_DIR: /data
     COOKIES_PATH: /secrets/cookies.txt
+    VAULT_UID: ${VAULT_UID:-}
+    VAULT_GID: ${VAULT_GID:-}
     LOG_LEVEL: ${LOG_LEVEL:-INFO}
     TZ: ${TZ:-UTC}
   volumes:
     - sme_data:/data
     - sme_secrets:/secrets
+    # The vault is a plain host folder, not buried in a Docker volume, so you can
+    # open it in Obsidian / a file manager / over SMB. Mounted over /data/vault;
+    # queue.db and media/ stay in sme_data. Migrate BEFORE first use — see
+    # RUNBOOK Part 11, or the existing notes get shadowed (not deleted).
+    - ${VAULT_DIR:-/srv/reel-vault}:/data/vault
   logging:
     driver: json-file
     options:

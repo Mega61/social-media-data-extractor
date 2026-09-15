@@ -17,6 +17,11 @@ def _req(name: str) -> str:
     return val
 
 
+def _opt_int(name: str) -> "int | None":
+    raw = os.environ.get(name, "").strip()
+    return int(raw) if raw else None
+
+
 def _int(name: str, default: int) -> int:
     raw = os.environ.get(name, "").strip()
     return int(raw) if raw else default
@@ -38,6 +43,8 @@ class Config:
     git_author_name: str
     git_author_email: str
     tags_file: Path
+    vault_uid: "int | None"
+    vault_gid: "int | None"
 
     # --- derived paths --------------------------------------------------
     @property
@@ -87,6 +94,8 @@ class Config:
             git_author_name=os.environ.get("GIT_AUTHOR_NAME", "reel-bot"),
             git_author_email=os.environ.get("GIT_AUTHOR_EMAIL", "reel-bot@localhost"),
             tags_file=Path(os.environ.get("TAGS_FILE", str(default_tags))),
+            vault_uid=_opt_int("VAULT_UID"),
+            vault_gid=_opt_int("VAULT_GID"),
         )
 
 
