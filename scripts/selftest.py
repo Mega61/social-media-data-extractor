@@ -196,6 +196,37 @@ _behaviour["extract"] = "ok"
 q._conn.execute("UPDATE jobs SET status='running' WHERE shortcode='BBB22222'")
 ok(q.release_running() == 1, "jobs left running by a crash are reclaimed")
 
+# 11. foreign-owned vault (the bind-mount regression)
+# GIT_TEST_ASSUME_DIFFERENT_OWNER forces git's dubious-ownership check to fail,
+# reproducing a bind-mounted vault owned by VAULT_UID under a root container
+# without needing two real uids.
+import subprocess as _sp
+from sme.vault import commit_note as _commit, ensure_repo as _ensure
+
+_foreign = dict(os.environ, GIT_TEST_ASSUME_DIFFERENT_OWNER="1",
+                HOME=str(tmp / "fakehome"))
+(tmp / "fakehome").mkdir(exist_ok=True)
+_probe = tmp / "foreign-vault"
+_probe.mkdir()
+_sp.run(["git", "init", "-q", "-b", "main", str(_probe)], check=True)
+_untrusted = _sp.run(["git", "-C", str(_probe), "config", "user.name", "x"],
+                     capture_output=True, text=True, env=_foreign)
+ok(_untrusted.returncode != 0, "foreign-owned repo does reject an untrusted git config")
+
+_real_env = os.environ.copy()
+os.environ.update(_foreign)
+try:
+    _ensure(_probe, branch="main", author_name="reel-bot", author_email="b@x")
+    (_probe / "reels").mkdir(exist_ok=True)
+    _n = _probe / "reels" / "n.md"
+    _n.write_text("# note")
+    ok(_commit(_probe, _n, "capture: test"), "ensure_repo + commit work on a foreign-owned vault")
+except Exception as e:
+    ok(False, f"ensure_repo failed on a foreign-owned vault: {e}")
+finally:
+    os.environ.clear()
+    os.environ.update(_real_env)
+
 # --- report -----------------------------------------------------------------
 shutil.rmtree(tmp, ignore_errors=True)
 failed = [l for c, l in checks if not c]

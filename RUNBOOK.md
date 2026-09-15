@@ -474,7 +474,7 @@ docker run --rm -v sme_data:/data -v /tmp:/out alpine \
 | `Skipped <code> — the reel is deleted, private, or unavailable` | Reel is genuinely gone                        | Nothing to fix; this is correct behaviour                                                                                         |
 | `Gemini quota exhausted`                                        | Free-tier daily cap                           | Retries automatically in an hour                                                                                                  |
 | Notes appear but transcript is empty                            | Reel has no speech                            | Check `on_screen_text` — that is where the content is                                                                             |
-| `git` errors about "dubious ownership"                          | Volume uid mismatch                           | Already handled via `safe.directory`; if it recurs, `docker exec sme-worker git config --global --add safe.directory /data/vault` |
+| `fatal: not in a git directory` on worker start | Vault bind mount owned by a different uid than the container | Fixed in the image — redeploy with *Re-pull image* ON |
 | Stack deploy fails immediately                                  | Volumes not created                           | Part 4 — both `sme_data` and `sme_secrets` must exist first                                                                       |
 | Vault looks empty after switching to `VAULT_DIR` | Bind mount shadowed the volume copy | Part 11a — stop the stack, copy the old vault out, redeploy |
 | New notes are owned by `root` | `VAULT_UID`/`VAULT_GID` unset | Set them to your `id -u` / `id -g` and update the stack |

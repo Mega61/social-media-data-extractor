@@ -15,8 +15,37 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
         ["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=120
     )
     if check and proc.returncode != 0:
-        raise RuntimeError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
+        err = (proc.stderr or proc.stdout).strip()
+        if "dubious ownership" in err or "not in a git directory" in err:
+            err += (f"\n\nThe vault at {repo} is owned by a different uid than this"
+                    " container. trust_repo() should have registered it as a git"
+                    " safe.directory before this call — that is a bug, not a config"
+                    " problem.")
+        raise RuntimeError(f"git {' '.join(args)} failed: {err}")
     return proc
+
+
+def trust_repo(repo: Path) -> None:
+    """Register the vault as a git safe.directory.
+
+    MUST run before any repo-scoped git command. The vault is a bind mount owned
+    by VAULT_UID while this container runs as root, so git's dubious-ownership
+    check makes repository discovery fail outright — and a `git config` with no
+    scope flag then reports the confusing "fatal: not in a git directory".
+
+    Idempotent: --add would append a duplicate on every process start, and the
+    container filesystem survives a restart.
+    """
+    path = str(repo)
+    current = subprocess.run(
+        ["git", "config", "--global", "--get-all", "safe.directory"],
+        capture_output=True, text=True,
+    ).stdout.split("\n")
+    if path not in current:
+        subprocess.run(
+            ["git", "config", "--global", "--add", "safe.directory", path],
+            capture_output=True, text=True,
+        )
 
 
 def chown_tree(path: Path, uid: Optional[int], gid: Optional[int]) -> None:
@@ -52,16 +81,15 @@ def chown_path(path: Path, uid: Optional[int], gid: Optional[int]) -> None:
 def ensure_repo(repo: Path, *, branch: str, author_name: str, author_email: str,
                 remote: str = "", uid: Optional[int] = None, gid: Optional[int] = None) -> None:
     repo.mkdir(parents=True, exist_ok=True)
+    # FIRST, before any repo-scoped git command. See trust_repo().
+    trust_repo(repo)
     if not (repo / ".git").exists():
         _git(repo, "init", "-b", branch)
         log.info("initialised vault repo at %s", repo)
-    _git(repo, "config", "user.name", author_name)
-    _git(repo, "config", "user.email", author_email)
-    # Container uid may differ from the volume's owner; git refuses to operate otherwise.
-    subprocess.run(
-        ["git", "config", "--global", "--add", "safe.directory", str(repo)],
-        capture_output=True, text=True,
-    )
+    # --local is explicit: without a scope flag git needs repo discovery to have
+    # succeeded, which is exactly what fails when the vault is not trusted.
+    _git(repo, "config", "--local", "user.name", author_name)
+    _git(repo, "config", "--local", "user.email", author_email)
     if remote:
         existing = _git(repo, "remote", check=False).stdout.split()
         if "origin" in existing:
