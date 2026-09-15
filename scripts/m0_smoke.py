@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from sme.config import load_tags  # noqa: E402
 from sme.downloader import DownloadError, download  # noqa: E402
-from sme.extractor import PROMPT_VERSION, extract  # noqa: E402
+from sme.extractor import DEFAULT_MODEL, PROMPT_VERSION, extract  # noqa: E402
 from sme.render import note_filename, render, write_note  # noqa: E402
 from sme.urls import extract as parse_urls  # noqa: E402
 
@@ -33,7 +33,7 @@ def main() -> int:
     ap.add_argument("--cookies", default=os.environ.get("COOKIES_PATH", "./cookies.txt"))
     ap.add_argument("--out", default="./m0-out")
     ap.add_argument("--tags", default=str(REPO / "config" / "tags.yml"))
-    ap.add_argument("--model", default=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"))
+    ap.add_argument("--model", default=os.environ.get("GEMINI_MODEL", DEFAULT_MODEL))
     ap.add_argument("--keep-json", action="store_true", help="also write the raw Gemini JSON")
     args = ap.parse_args()
 

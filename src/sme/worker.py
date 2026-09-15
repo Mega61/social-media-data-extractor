@@ -19,7 +19,7 @@ from google import genai
 from .config import Config, load_tags
 from .db import Queue
 from .downloader import PAUSING, DownloadError, download
-from .extractor import PROMPT_VERSION, ExtractionError, extract
+from .extractor import PROMPT_VERSION, ExtractionError, available_models, extract
 from .notify import send
 from .render import note_filename, render, write_note
 from .vault import commit_note, ensure_repo, push
@@ -71,14 +71,15 @@ class Worker:
         if target:
             send(self.cfg.telegram_token, target, text, silent=silent)
 
-    def pause(self, chat_id, reason: str, detail: str) -> None:
+    def pause(self, chat_id, reason: str, detail: str, fix: str = "") -> None:
         self.q.pause(reason)
         log.error("PAUSED: %s | %s", reason, detail)
+        fix = fix or ("Instagram work has stopped. Refresh `cookies.txt` "
+                      "(send it to this chat), then /resume.")
         self.notify(
             chat_id,
             f"*Worker paused* — {reason}\n\n"
-            f"```\n{detail[:600]}\n```\n"
-            "Instagram work has stopped. Refresh `cookies.txt` on the host, then send /resume.",
+            f"```\n{detail[:600]}\n```\n" + fix,
         )
 
     # --- rate limiting ----------------------------------------------------
@@ -188,6 +189,26 @@ class Worker:
             self.q.mark_terminal(sc, "failed", error_class, message)
             self.notify(chat, f"Failed `{sc}` — {message[:300]}")
             return
+        if error_class == "gemini_model_gone":
+            # Retrying a retired model name forever just hides the problem.
+            self.q.mark_terminal(sc, "failed", error_class, message)
+            alts = available_models(self.cfg.gemini_api_key)
+            hint = ("\n\nModels this key can call:\n" + "\n".join(f"· `{m}`" for m in alts[:8])) if alts else ""
+            self.pause(chat, "Gemini model unavailable", message,
+                       fix=f"`GEMINI_MODEL={self.cfg.gemini_model}` is retired. Set a current "
+                           f"one in the stack environment and redeploy, then /resume.{hint}")
+            return
+        if error_class == "gemini_billing":
+            # A depleted balance is not a rate limit; no amount of waiting fixes it.
+            self.q.mark_retry(sc, error_class, message, 300)
+            self.pause(chat, "Gemini billing", message,
+                       fix="Top up prepay credits at https://ai.studio/projects , then /resume. "
+                           "Queued reels are kept and will drain automatically.")
+            return
+        if error_class == "gemini_busy":
+            self.q.mark_retry(sc, error_class, message, backoff_for(job["attempts"]))
+            log.info("[%s] Gemini busy, retry in %ds", sc, backoff_for(job["attempts"]))
+            return
         if error_class == "gemini_quota":
             self.q.mark_retry(sc, error_class, message, 3600)
             self.notify(chat, "Gemini quota exhausted. Retrying in an hour.", silent=True)
@@ -239,7 +260,7 @@ class Worker:
             except DownloadError as e:
                 self.fail(job, e.error_class, e.message)
             except ExtractionError as e:
-                self.fail(job, "gemini_quota" if is_quota_error(e) else "extraction", str(e))
+                self.fail(job, e.error_class, str(e))
             except Exception as e:  # noqa: BLE001 - a bad job must not kill the loop
                 log.exception("[%s] unhandled", job["shortcode"])
                 self.fail(job, "gemini_quota" if is_quota_error(e) else "internal", repr(e))

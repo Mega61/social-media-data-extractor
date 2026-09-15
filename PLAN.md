@@ -88,7 +88,7 @@ This is the part that decides whether the project survives.
 ### Extraction
 
 - Always use the Files API (upload → poll for `ACTIVE` → generate). Inline base64 is capped at 20MB and reels cross it.
-- `gemini-2.5-flash`, structured output against this schema:
+- `gemini-3.6-flash`, structured output against this schema:
 
 ```jsonc
 {
@@ -130,7 +130,7 @@ creator: "@handle"
 captured_at: 2026-09-14T10:22:00Z
 duration_s: 47
 tags: [ads, hooks-scripting]
-model: gemini-2.5-flash
+model: gemini-3.6-flash
 prompt_version: 3
 ---
 

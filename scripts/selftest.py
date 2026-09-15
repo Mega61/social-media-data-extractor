@@ -32,6 +32,7 @@ from sme import worker as W  # noqa: E402
 from sme.config import Config  # noqa: E402
 from sme.db import Queue, iso, utcnow  # noqa: E402
 from sme.downloader import DownloadError, DownloadResult  # noqa: E402
+from sme.extractor import ExtractionError  # noqa: E402
 
 checks: list[tuple[bool, str]] = []
 
@@ -72,7 +73,15 @@ def fake_download(url, shortcode, media_dir, cookies, **kw):
 
 
 W.download = fake_download
-W.extract = lambda *a, **k: dict(FAKE_JSON)
+def fake_extract(*a, **k):
+    mode = _behaviour.get("extract", "ok")
+    if mode != "ok":
+        raise ExtractionError(f"simulated {mode}", mode)
+    return dict(FAKE_JSON)
+
+
+W.extract = fake_extract
+W.available_models = lambda key: ["gemini-3.6-flash", "gemini-3.8-flash"]
 W.genai.Client = lambda **kw: object()
 W.send = lambda *a, **k: True
 
@@ -158,7 +167,32 @@ ok(not media.exists(), "media older than retention is pruned")
 ok(q.get("AAA11111")["media_pruned"] == 1, "prune recorded on the job row")
 ok(Path(q.get("AAA11111")["note_path"]).exists(), "note survives media pruning")
 
-# 9. crash recovery
+# 9. Gemini failure policies
+_behaviour["download"] = "ok"
+q.resume()
+_behaviour["extract"] = "gemini_model_gone"
+q.enqueue("FFF66666", "https://www.instagram.com/reel/FFF66666/", 1)
+w.run(once=True)
+ok(q.get("FFF66666")["status"] == "failed", "retired model name fails fast, not retried forever")
+ok(q.is_paused(), "retired model pauses the worker for human action")
+ok("model" in q.get_state("pause_reason").lower(), "pause names the model problem")
+
+q.resume()
+_behaviour["extract"] = "gemini_billing"
+q.enqueue("GGG77777", "https://www.instagram.com/reel/GGG77777/", 1)
+w.run(once=True)
+ok(q.is_paused(), "depleted billing pauses instead of burning retries")
+ok(q.get("GGG77777")["status"] == "retry", "the reel is kept for after the top-up")
+
+q.resume()
+_behaviour["extract"] = "gemini_busy"
+q.requeue("GGG77777")
+w.run(once=True)
+ok(not q.is_paused(), "a 503 capacity blip does NOT pause the worker")
+ok(q.get("GGG77777")["status"] == "retry", "503 schedules a normal backoff retry")
+_behaviour["extract"] = "ok"
+
+# 10. crash recovery
 q._conn.execute("UPDATE jobs SET status='running' WHERE shortcode='BBB22222'")
 ok(q.release_running() == 1, "jobs left running by a crash are reclaimed")
 

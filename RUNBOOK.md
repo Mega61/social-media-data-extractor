@@ -176,7 +176,7 @@ pushes it to GHCR, and Portainer just pulls it.
    TELEGRAM_BOT_TOKEN=8012345678:AAHxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
    TELEGRAM_ALLOWED_USER_IDS=
    GEMINI_API_KEY=AIzaSyXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-   GEMINI_MODEL=gemini-2.5-flash
+   GEMINI_MODEL=gemini-3.6-flash
    DOWNLOAD_MIN_INTERVAL_S=90
    DOWNLOAD_DAILY_CAP=20
    MEDIA_RETENTION_DAYS=30
@@ -309,7 +309,7 @@ Every required line must be green:
   PASS  Instagram cookie present and unexpired  sessionid valid for 58 more days
   PASS  Telegram bot token valid                @mega_reelvault_bot (id 8012345678)
   PASS  Telegram allowlist configured           ids: 123456789
-  PASS  Gemini API key valid                    gemini-2.5-flash responded 'ok'
+  PASS  Gemini API key valid                    gemini-3.6-flash responded 'ok'
   PASS  vault git remote reachable              no GIT_REMOTE set — committing locally only
 
   All required checks passed. 1 warning(s).

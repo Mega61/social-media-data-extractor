@@ -76,7 +76,7 @@ class Config:
             allowed_user_ids=ids,
             gemini_api_key=_req("GEMINI_API_KEY") if require_gemini
             else os.environ.get("GEMINI_API_KEY", ""),
-            gemini_model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
+            gemini_model=os.environ.get("GEMINI_MODEL", "gemini-3.6-flash"),
             data_dir=Path(os.environ.get("DATA_DIR", "/data")),
             download_min_interval_s=_int("DOWNLOAD_MIN_INTERVAL_S", 90),
             download_daily_cap=_int("DOWNLOAD_DAILY_CAP", 20),

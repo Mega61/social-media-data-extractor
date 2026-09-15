@@ -17,6 +17,8 @@ from .config import TagVocabulary
 
 PROMPT_VERSION = 1
 
+DEFAULT_MODEL = "gemini-3.6-flash"
+
 CLAIM_KINDS = ["tactic", "metric", "opinion", "tool"]
 
 
@@ -113,7 +115,40 @@ Metadata about this reel, for your context only (do not restate it in the output
 
 
 class ExtractionError(Exception):
-    pass
+    def __init__(self, message: str, error_class: str = "extraction"):
+        super().__init__(message)
+        self.error_class = error_class
+
+
+def classify_gemini_error(exc: Exception) -> str:
+    """Map an SDK exception to a retry policy.
+
+    The distinction that matters: which of these a human has to act on. Retrying
+    a retired model name or a depleted balance forever just hides the problem.
+    """
+    s = str(exc).lower()
+    if "no longer available" in s or ("404" in s and "not_found" in s):
+        return "gemini_model_gone"      # fatal: the model name is wrong
+    if "prepayment credits are depleted" in s or "billing" in s or "billed users" in s:
+        return "gemini_billing"         # pause: needs a top-up, not a retry
+    if "resource_exhausted" in s or "429" in s or "quota" in s:
+        return "gemini_quota"           # retry in an hour
+    if "503" in s or "unavailable" in s or "high demand" in s:
+        return "gemini_busy"            # capacity blip, normal backoff
+    return "extraction"
+
+
+def available_models(api_key: str) -> list[str]:
+    """Flash models this key can actually call. Used to make errors actionable."""
+    try:
+        client = genai.Client(api_key=api_key)
+        return sorted(
+            m.name.replace("models/", "")
+            for m in client.models.list()
+            if "flash" in m.name and "image" not in m.name and "tts" not in m.name
+        )
+    except Exception:
+        return []
 
 
 def _upload_and_wait(client: genai.Client, path: Path, *, timeout_s: int = 300) -> types.File:
@@ -128,6 +163,30 @@ def _upload_and_wait(client: genai.Client, path: Path, *, timeout_s: int = 300) 
     if state != "ACTIVE":
         raise ExtractionError(f"Gemini file ended in state {state}")
     return f
+
+
+def _generate(client, model: str, uploaded, prompt: str, tags: TagVocabulary):
+    try:
+        return client.models.generate_content(
+            model=model,
+            contents=[uploaded, prompt],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=build_schema(tags),
+                temperature=0.2,
+                # Extraction is not a reasoning task. Disabling thinking cuts token
+                # spend with no measurable quality loss here (verified: 0 thought
+                # tokens, same structured output).
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+                # We pass no tools; without this the SDK logs an AFC warning on
+                # every single call.
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                    disable=True
+                ),
+            ),
+        )
+    except Exception as e:
+        raise ExtractionError(str(e), classify_gemini_error(e)) from e
 
 
 def extract(
@@ -148,18 +207,7 @@ def extract(
         caption=(caption[:1500] or "(none)"),
     )
     try:
-        resp = client.models.generate_content(
-            model=model,
-            contents=[uploaded, prompt],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=build_schema(tags),
-                temperature=0.2,
-                # Extraction is not a reasoning task. Disabling thinking roughly
-                # halves token spend, which matters on the free tier.
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
-        )
+        resp = _generate(client, model, uploaded, prompt, tags)
     finally:
         try:
             client.files.delete(name=uploaded.name)

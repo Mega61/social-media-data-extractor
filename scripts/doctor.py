@@ -127,9 +127,22 @@ def _gemini():
     key = os.environ.get("GEMINI_API_KEY", "")
     if not key:
         return False, "GEMINI_API_KEY unset"
+    from sme.extractor import DEFAULT_MODEL, classify_gemini_error
     client = genai.Client(api_key=key)
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-    r = client.models.generate_content(model=model, contents="Reply with the single word: ok")
+    model = os.environ.get("GEMINI_MODEL", DEFAULT_MODEL)
+    try:
+        r = client.models.generate_content(model=model, contents="Reply with the single word: ok")
+    except Exception as e:
+        cls = classify_gemini_error(e)
+        if cls == "gemini_model_gone":
+            alts = [m.name.replace("models/", "") for m in client.models.list()
+                    if "flash" in m.name and "image" not in m.name and "tts" not in m.name]
+            return False, f"GEMINI_MODEL={model} is retired. Try: {', '.join(sorted(alts)[:5])}"
+        if cls == "gemini_billing":
+            return False, "prepay credits depleted — top up at https://ai.studio/projects"
+        if cls == "gemini_busy":
+            return False, f"{model} returned 503 (capacity). Key is fine; retry shortly."
+        raise
     return bool(r.text), f"{model} responded {r.text.strip()[:40]!r}"
 
 
