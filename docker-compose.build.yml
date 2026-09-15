@@ -1,0 +1,16 @@
+# Override to build locally instead of pulling from GHCR.
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+# Add --build-arg WITH_FFMPEG=true only if a source needs stream merging.
+services:
+  bot:
+    image: sme:local
+    pull_policy: build
+    build: &b
+      context: .
+      dockerfile: Dockerfile
+      args:
+        WITH_FFMPEG: "${WITH_FFMPEG:-false}"
+  worker:
+    image: sme:local
+    pull_policy: build
+    build: *b

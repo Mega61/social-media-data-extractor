@@ -73,5 +73,7 @@ export PYTHONPATH=src GEMINI_API_KEY=... DATA_DIR=./data
 
 ## Status
 
-M0–M2 implemented. `GIT_REMOTE` unset by default (commits locally); set it to
-enable M3 push-based sync. M4 (MCP retrieval server) not started.
+M0–M2 implemented. Image is built by GitHub Actions and published to
+`ghcr.io/mega61/social-media-data-extractor:main`; the homelab only pulls.
+`GIT_REMOTE` unset by default (commits locally); set it to enable M3 push-based
+sync. M4 (MCP retrieval server) not started.

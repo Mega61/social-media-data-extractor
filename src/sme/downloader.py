@@ -35,6 +35,8 @@ _SIGNATURES: tuple[tuple[str, str], ...] = (
     ("auth", "cookies are no longer valid"),
     ("auth", "no longer valid"),
     ("auth", "empty media response"),
+    ("no_ffmpeg", "ffmpeg is not installed"),
+    ("no_ffmpeg", "ffmpeg or avconv"),
     ("gone", "http error 404"),
     ("gone", "video unavailable"),
     ("gone", "post is private"),
@@ -110,8 +112,10 @@ def download(
         "--retries", "2", "--socket-timeout", "30",
         "--sleep-requests", "2",
         "--max-filesize", max_filesize,
-        "--merge-output-format", "mp4",
-        "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+        # Pre-muxed formats only. `b` is yt-dlp's best SINGLE file containing both
+        # video and audio, so no merge step is ever needed and the image does not
+        # have to ship ffmpeg. Instagram serves progressive MP4 for reels.
+        "-f", "b[ext=mp4]/b",
         "--write-info-json",
         "-o", out_tpl,
         "--", url,

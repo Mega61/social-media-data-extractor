@@ -179,6 +179,11 @@ class Worker:
             self.q.mark_terminal(sc, "skipped", error_class, message)
             self.notify(chat, f"Skipped `{sc}` — the reel is deleted, private, or unavailable.")
             return
+        if error_class == "no_ffmpeg":
+            self.q.mark_terminal(sc, "failed", error_class, message)
+            self.notify(chat, f"Failed `{sc}` — this source needs stream merging. "
+                              "Rebuild the image with `--build-arg WITH_FFMPEG=true`.")
+            return
         if error_class == "fatal":
             self.q.mark_terminal(sc, "failed", error_class, message)
             self.notify(chat, f"Failed `{sc}` — {message[:300]}")

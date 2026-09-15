@@ -41,10 +41,10 @@ def _ytdlp():
     return v.returncode == 0, f"version {v.stdout.strip()}"
 
 
-@check("ffmpeg installed")
+@check("ffmpeg installed (optional)", required=False)
 def _ffmpeg():
     if not shutil.which("ffmpeg"):
-        return False, "not on PATH (yt-dlp cannot merge streams)"
+        return False, "not on PATH — fine: formats are pinned to pre-muxed, nothing to merge"
     v = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, timeout=30)
     return v.returncode == 0, v.stdout.splitlines()[0][:60]
 

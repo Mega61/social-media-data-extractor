@@ -11,14 +11,14 @@ can check, so you never carry a broken assumption into the next step.
 
 ## Part 0 — What you need before you start
 
-| Thing | Where it comes from | Part |
-|---|---|---|
-| Telegram bot token | @BotFather | 1 |
-| Your Telegram numeric user id | the bot itself, `/whoami` | 6 |
-| Gemini API key | aistudio.google.com | 2 |
-| Instagram burner account | a fresh signup | 3 |
-| `cookies.txt` from that burner | browser extension | 3 |
-| Portainer admin access | your homelab | 4 |
+| Thing                          | Where it comes from       | Part |
+| ------------------------------ | ------------------------- | ---- |
+| Telegram bot token             | @BotFather                | 1    |
+| Your Telegram numeric user id  | the bot itself, `/whoami` | 6    |
+| Gemini API key                 | aistudio.google.com       | 2    |
+| Instagram burner account       | a fresh signup            | 3    |
+| `cookies.txt` from that burner | browser extension         | 3    |
+| Portainer admin access         | your homelab              | 4    |
 
 Do **not** use your personal Instagram account for the cookie. The account that
 holds this session is the one that gets rate-limited or banned.
@@ -127,25 +127,42 @@ recreating the stack.
 
 **Check:** the Volumes list shows `sme_data` and `sme_secrets`, both *Unused*.
 
-| Volume | Mounted at | Holds |
-|---|---|---|
-| `sme_data` | `/data` | `queue.db`, `media/` (30-day), `vault/` (the git repo and your notes) |
-| `sme_secrets` | `/secrets` | `cookies.txt` only |
+| Volume        | Mounted at | Holds                                                                 |
+| ------------- | ---------- | --------------------------------------------------------------------- |
+| `sme_data`    | `/data`    | `queue.db`, `media/` (30-day), `vault/` (the git repo and your notes) |
+| `sme_secrets` | `/secrets` | `cookies.txt` only                                                    |
 
 ---
 
 ## Part 5 — Deploy the stack
+
+### 5a. Let the image build first (once)
+
+The homelab no longer builds anything — GitHub Actions builds the image and
+pushes it to GHCR, and Portainer just pulls it.
+
+1. Push to `main` (or GitHub → **Actions** → *build* → **Run workflow**).
+2. Wait for the run to go green (~90 seconds). If it fails, the log says exactly
+   why — which is the whole point of moving the build off Portainer.
+3. GitHub → your profile → **Packages** → `social-media-data-extractor` →
+   **Package settings** → **Change visibility** → **Public**.
+
+   Public is fine: the image contains code, never secrets. To keep it private
+   instead, add a registry in Portainer (**Registries → Add registry → Custom**,
+   URL `ghcr.io`, username `Mega61`, password = a PAT with `read:packages`).
+
+### 5b. Deploy the stack
 
 1. Portainer → left sidebar → **Stacks** → **Add stack**
 2. **Name:** `sme` (lowercase — it becomes the compose project name)
 3. **Build method:** select **Repository**
 4. Fill in:
 
-   | Field | Value |
-   |---|---|
-   | Repository URL | `https://github.com/Mega61/social-media-data-extractor` |
-   | Repository reference | `refs/heads/main` |
-   | Compose path | `docker-compose.yml` |
+   | Field                | Value                                                   |
+   | -------------------- | ------------------------------------------------------- |
+   | Repository URL       | `https://github.com/Mega61/social-media-data-extractor` |
+   | Repository reference | `refs/heads/main`                                       |
+   | Compose path         | `docker-compose.yml`                                    |
 
 5. If the repo is **private**, toggle **Authentication** on:
    - Username: `Mega61`
@@ -177,12 +194,31 @@ recreating the stack.
 
 7. Click **Deploy the stack**.
 
-The first deploy **builds the image** and takes 2–5 minutes. The button will
-spin. Do not click it twice.
+The deploy pulls a prebuilt image and takes about 20 seconds.
 
 **Check:** Portainer → **Containers** shows `sme-bot` and `sme-worker`, both
 *running*, both green. If `sme-worker` is restarting in a loop, open its **Logs**
 — it is almost always a missing environment variable, and the log line names it.
+
+### 5c. When Portainer says `[object Object]`
+
+Portainer renders some backend errors as `[object Object]`, which tells you
+nothing. Get the real message from the host over SSH:
+
+```bash
+cd /tmp && git clone https://github.com/Mega61/social-media-data-extractor.git sme && cd sme
+cp /path/to/your.env .env
+docker compose config          # catches compose/env mistakes
+docker compose up -d           # prints the ACTUAL error
+```
+
+The three causes, in order of how often they are the answer:
+
+| Real error | Shown as | Fix |
+|---|---|---|
+| `external volume "sme_data" not found` | `[object Object]` | Part 4 — create both volumes first |
+| Build exceeded Portainer's timeout | `[object Object]` after minutes of log | Fixed by 5a: nothing builds on the homelab now |
+| `denied` / `unauthorized` from ghcr.io | `[object Object]` | Package is still private — 5a step 3 |
 
 ---
 
@@ -265,7 +301,7 @@ Every required line must be green:
 
 ```
   PASS  yt-dlp installed                        version 2026.08.19
-  PASS  ffmpeg installed                        ffmpeg version 6.1.1
+  WARN  ffmpeg installed (optional)          not on PATH — fine: formats are pinned to pre-muxed
   PASS  git installed                           git version 2.39.5
   PASS  tag vocabulary loads                    v1, 14 tags: ads, personal-brand, …
   PASS  data directories writable               /data (media, vault, vault/reels present)
@@ -276,7 +312,7 @@ Every required line must be green:
   PASS  Gemini API key valid                    gemini-2.5-flash responded 'ok'
   PASS  vault git remote reachable              no GIT_REMOTE set — committing locally only
 
-  All required checks passed.
+  All required checks passed. 1 warning(s).
 ```
 
 Fix anything red before continuing. Each line tests exactly one dependency, so a
@@ -379,13 +415,19 @@ console — it reports the exact expiry.
 
 ### Everyday commands
 
-| Command | Does |
-|---|---|
-| `/status` | Queue depth, pause state, downloads used of today's budget |
-| `/failed` | Last 10 problems with the error on each |
-| `/retry <shortcode>` | Requeue one reel, attempt counter reset |
-| `/pause` | Stop touching Instagram immediately |
-| `/resume` | Clear a pause |
+| Command              | Does                                                       |
+| -------------------- | ---------------------------------------------------------- |
+| `/status`            | Queue depth, pause state, downloads used of today's budget |
+| `/failed`            | Last 10 problems with the error on each                    |
+| `/retry <shortcode>` | Requeue one reel, attempt counter reset                    |
+| `/pause`             | Stop touching Instagram immediately                        |
+| `/resume`            | Clear a pause                                              |
+
+### Shipping a code change
+
+Push to `main`. Actions rebuilds and pushes the image (~90s). Then Portainer →
+Stacks → `sme` → **Update the stack** with **Re-pull image** ON. Nothing builds
+on the homelab, ever.
 
 ### Logs
 
@@ -422,18 +464,22 @@ docker run --rm -v sme_data:/data -v /tmp:/out alpine \
 
 ## Part 10 — Troubleshooting
 
-| Symptom | Cause | Fix |
-|---|---|---|
-| Bot silent to everything | Your id is not in `TELEGRAM_ALLOWED_USER_IDS` | `/whoami`, update stack env |
-| Bot replies with your user id and nothing else | Allowlist is empty | Part 6 |
-| `sme-worker` restart loop | Missing env var | Read its Logs; the line names the variable |
-| `Worker paused — Instagram auth` | Cookie dead or account checkpointed | Re-export cookie, send to bot |
-| `Worker paused — Instagram ratelimit` | Pulling too fast | Lower `DOWNLOAD_DAILY_CAP`, wait 24h, `/resume` |
-| `Skipped <code> — the reel is deleted, private, or unavailable` | Reel is genuinely gone | Nothing to fix; this is correct behaviour |
-| `Gemini quota exhausted` | Free-tier daily cap | Retries automatically in an hour |
-| Notes appear but transcript is empty | Reel has no speech | Check `on_screen_text` — that is where the content is |
-| `git` errors about "dubious ownership" | Volume uid mismatch | Already handled via `safe.directory`; if it recurs, `docker exec sme-worker git config --global --add safe.directory /data/vault` |
-| Stack deploy fails immediately | Volumes not created | Part 4 — both `sme_data` and `sme_secrets` must exist first |
+| Symptom                                                         | Cause                                         | Fix                                                                                                                               |
+| --------------------------------------------------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Bot silent to everything                                        | Your id is not in `TELEGRAM_ALLOWED_USER_IDS` | `/whoami`, update stack env                                                                                                       |
+| Bot replies with your user id and nothing else                  | Allowlist is empty                            | Part 6                                                                                                                            |
+| `sme-worker` restart loop                                       | Missing env var                               | Read its Logs; the line names the variable                                                                                        |
+| `Worker paused — Instagram auth`                                | Cookie dead or account checkpointed           | Re-export cookie, send to bot                                                                                                     |
+| `Worker paused — Instagram ratelimit`                           | Pulling too fast                              | Lower `DOWNLOAD_DAILY_CAP`, wait 24h, `/resume`                                                                                   |
+| `Skipped <code> — the reel is deleted, private, or unavailable` | Reel is genuinely gone                        | Nothing to fix; this is correct behaviour                                                                                         |
+| `Gemini quota exhausted`                                        | Free-tier daily cap                           | Retries automatically in an hour                                                                                                  |
+| Notes appear but transcript is empty                            | Reel has no speech                            | Check `on_screen_text` — that is where the content is                                                                             |
+| `git` errors about "dubious ownership"                          | Volume uid mismatch                           | Already handled via `safe.directory`; if it recurs, `docker exec sme-worker git config --global --add safe.directory /data/vault` |
+| Stack deploy fails immediately                                  | Volumes not created                           | Part 4 — both `sme_data` and `sme_secrets` must exist first                                                                       |
+| Deploy fails with `[object Object]` | Portainer swallowing the real error | Part 5c — reproduce over SSH to see it |
+| Deploy dies mid-`apt-get` after minutes | Building on the homelab | Part 5a — pull the prebuilt image instead |
+| `ERROR: ... ffmpeg is not installed` | Source needs stream merging | Rebuild with `WITH_FFMPEG=true` (`docker-compose.build.yml`) |
+| `WARN ffmpeg installed (optional)` | Expected | Formats are pinned to pre-muxed; nothing to merge |
 
 ---
 

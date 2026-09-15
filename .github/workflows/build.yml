@@ -1,0 +1,46 @@
+# Builds the image and publishes it to GHCR so the homelab never builds anything.
+# Portainer then just pulls a finished image: deploys drop from ~4 minutes to ~20
+# seconds, and build failures show up here with real logs instead of as
+# "[object Object]" in the Portainer UI.
+name: build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # lowercase: GHCR rejects uppercase in image paths
+          tags: |
+            ghcr.io/mega61/social-media-data-extractor:main
+            ghcr.io/mega61/social-media-data-extractor:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test the image
+        run: |
+          docker run --rm --entrypoint python \
+            ghcr.io/mega61/social-media-data-extractor:main \
+            -c "import sme.bot, sme.worker; print('image imports OK')"

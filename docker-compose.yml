@@ -1,5 +1,8 @@
 # Deployed as a Portainer stack. See RUNBOOK.md for the click-by-click.
 #
+# This pulls a prebuilt image from GHCR — the homelab does NOT build anything.
+# To build locally instead:  docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
 # Prerequisites — create BOTH volumes in the Portainer UI before first deploy:
 #   Volumes → Add volume → name: sme_data     → Create the volume
 #   Volumes → Add volume → name: sme_secrets  → Create the volume
@@ -9,10 +12,8 @@
 name: sme
 
 x-common: &common
-  build:
-    context: .
-    dockerfile: Dockerfile
-  image: sme:latest
+  image: ${SME_IMAGE:-ghcr.io/mega61/social-media-data-extractor:main}
+  pull_policy: always
   restart: unless-stopped
   environment:
     TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
