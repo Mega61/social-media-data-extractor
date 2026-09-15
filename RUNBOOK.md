@@ -597,6 +597,80 @@ tar czf ~/reel-vault-$(date +%F).tar.gz -C /srv reel-vault
 
 ---
 
+## Part 12 — Get the vault into a Claude session (M3)
+
+The point of the whole pipeline. The vault is already a git repo, so the
+transport is just a remote: the homelab pushes after every capture, and any
+machine clones it.
+
+### 12a. Create the vault remote
+
+The vault is **separate** from this code repo.
+
+1. GitHub → **New repository** → name `reel-vault` → **Private** → create it
+   empty (no README, no .gitignore — the vault already has commits).
+2. Make a PAT with `repo` scope
+   (Settings → Developer settings → Personal access tokens).
+3. Portainer → Stacks → `sme` → Environment variables:
+
+   ```
+   GIT_REMOTE=https://<user>:<PAT>@github.com/<user>/reel-vault.git
+   GIT_BRANCH=main
+   ```
+
+4. **Update the stack.**
+
+The worker pushes after each commit. A failed push is logged as a warning and
+never loses a note — the commit already happened locally, so the next successful
+push carries everything.
+
+**Check**, in the worker console:
+
+```bash
+git -C /data/vault log --oneline | head
+git -C /data/vault push origin main      # should say "Everything up-to-date"
+```
+
+### 12b. Clone it where you run Claude
+
+```bash
+cd ~/Documents/home-automation
+git clone https://github.com/<user>/reel-vault.git
+```
+
+`CLAUDE.md` in that directory already tells a Claude session how to refresh and
+query the vault, so this works with no further setup.
+
+### 12c. The session workflow
+
+```bash
+git -C reel-vault pull --ff-only
+python social-media-data-extractor/scripts/vault_index.py reel-vault/reels --tags
+```
+
+Then ask the question. Survey with the index, filter by tag, read in full only
+the handful of notes that matter. A full note is 1–3k tokens and mostly
+transcript, so reading the vault wholesale stops working somewhere around 100
+notes — which is exactly the bound the design doc predicted, and exactly what
+tag filtering is for.
+
+```bash
+# everything tagged ads, with just the claims — usually enough to answer
+python social-media-data-extractor/scripts/vault_index.py reel-vault/reels --tag ads --claims
+
+# which notes predate the current extraction prompt
+python social-media-data-extractor/scripts/vault_index.py reel-vault/reels --stale 2
+```
+
+### 12d. When to build the MCP server (M4)
+
+Not yet. Grep and the index over a local clone beat a retrieval service until
+the vault is large enough that tag filtering stops bounding the context — call
+it several hundred notes. Build M4 when you actually hit that, not before; a
+local git clone has no moving parts to break.
+
+---
+
 ## Appendix — Running M0 without deploying anything
 
 The fail-fast milestone. Proves the download and extraction halves work before
