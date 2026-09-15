@@ -178,6 +178,41 @@ Non-negotiable, and cheap. The doc's stated failure mode is "it gets abandoned" 
 
 M0 exists to fail fast. If Instagram won't serve the burner account, we find out in an afternoon instead of after building a bot.
 
+## Deferred: Instagram DM as the ingress path
+
+Considered 2026-09-14, deferred pending real-world friction data.
+
+The idea: DM a reel to the burner from the personal account instead of sharing
+to Telegram, and have the burner's inbox feed the queue.
+
+**Verdict: feasible officially, deferred as probably not worth it.**
+
+The official route is the Instagram Messaging API. A `messages` webhook on a
+professional account delivers shared reels as an `ig_reel` attachment, and the
+notification carries the reel's URL — which drops straight into `urls.py` with
+no change to the download or extraction path.
+
+| Requirement | Detail |
+|---|---|
+| Burner converts to Business/Creator | Must be linked to a Facebook Page |
+| Meta developer app | Instagram product, `messages` webhook subscription |
+| App Review | Not required — only receiving messages for our own account. Personal IG is added as an app tester |
+| Public HTTPS endpoint | Cloudflare Tunnel to the homelab, new `webhook` service writing to the same SQLite queue |
+
+Costs: the burner stops looking like a burner (Business account, linked Page),
+and shares from private accounts land on the `UNSUPPORTED` webhook.
+
+**Why deferred.** The gain is roughly two taps. After a few shares the OS share
+sheet surfaces the Telegram bot chat as a direct target, at which point both
+paths are Share → tap icon. Build this only if that fails to materialise and the
+Telegram hop still feels like friction after sustained use.
+
+**Explicitly rejected: `instagrapi` DM polling.** No Meta app and no public
+endpoint needed, but it drives the private API on the burner account and polls
+an inbox continuously — a far louder pattern than an occasional yt-dlp pull. It
+attacks the exact failure mode this system is designed around, trading a
+reliable ingress for a fragile one.
+
 ## Remaining unknowns
 
 - Gemini free-tier RPD against expected volume — measure during M1, not before.
