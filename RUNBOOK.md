@@ -607,14 +607,30 @@ machine clones it.
 
 The vault is **separate** from this code repo.
 
-1. GitHub → **New repository** → name `reel-vault` → **Private** → create it
-   empty (no README, no .gitignore — the vault already has commits).
-2. Make a PAT with `repo` scope
-   (Settings → Developer settings → Personal access tokens).
+1. The repo already exists: **https://github.com/Mega61/reel-vault** (private,
+   empty). It is separate from the code repo on purpose — the vault is content,
+   and mixing them would put your notes in the image build context.
+
+2. Mint a **fine-grained** PAT, not a classic one:
+
+   GitHub → Settings → Developer settings → Personal access tokens →
+   **Fine-grained tokens** → **Generate new token**
+
+   | Field | Value |
+   |---|---|
+   | Repository access | **Only select repositories** → `reel-vault` |
+   | Permissions → Repository → Contents | **Read and write** |
+   | Expiration | 1 year (calendar-reminder it; an expired token fails the push, not the capture) |
+
+   A classic `repo`-scope token would grant write access to *every* repo you own.
+   This one can touch exactly the vault. It is going into a Portainer environment
+   variable, visible in the UI and in `docker inspect`, so the blast radius is
+   worth bounding.
+
 3. Portainer → Stacks → `sme` → Environment variables:
 
    ```
-   GIT_REMOTE=https://<user>:<PAT>@github.com/<user>/reel-vault.git
+   GIT_REMOTE=https://Mega61:<FINE_GRAINED_PAT>@github.com/Mega61/reel-vault.git
    GIT_BRANCH=main
    ```
 
@@ -624,18 +640,22 @@ The worker pushes after each commit. A failed push is logged as a warning and
 never loses a note — the commit already happened locally, so the next successful
 push carries everything.
 
-**Check**, in the worker console:
+**Seed the remote once**, in the worker console. The worker only pushes after a
+*new* commit, so existing notes will not appear until the next capture unless you
+push them by hand:
 
 ```bash
-git -C /data/vault log --oneline | head
-git -C /data/vault push origin main      # should say "Everything up-to-date"
+git -C /data/vault log --oneline | head     # what you are about to push
+git -C /data/vault push -u origin main      # seeds the empty remote
 ```
+
+After that it is automatic — every capture commits and pushes.
 
 ### 12b. Clone it where you run Claude
 
 ```bash
 cd ~/Documents/home-automation
-git clone https://github.com/<user>/reel-vault.git
+git clone https://github.com/Mega61/reel-vault.git
 ```
 
 `CLAUDE.md` in that directory already tells a Claude session how to refresh and
