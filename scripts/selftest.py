@@ -23,16 +23,17 @@ tmp = Path(tempfile.mkdtemp(prefix="sme-selftest-"))
 os.environ.update(
     DATA_DIR=str(tmp), TELEGRAM_BOT_TOKEN="", TELEGRAM_ALLOWED_USER_IDS="1",
     GEMINI_API_KEY="fake", COOKIES_PATH=str(tmp / "cookies.txt"),
-    TAGS_FILE=str(REPO / "config" / "tags.yml"), GIT_REMOTE="",
+    PROFILES_DIR=str(REPO / "config" / "profiles"), GIT_REMOTE="",
     # the real gate is 90s between downloads; this test is about policy, not pacing
     DOWNLOAD_MIN_INTERVAL_S=os.environ.get("SELFTEST_INTERVAL","0"), DOWNLOAD_DAILY_CAP="1000",
 )
 
 from sme import worker as W  # noqa: E402
-from sme.config import Config  # noqa: E402
+from sme.bot import parse_profile  # noqa: E402
+from sme.config import Config, load_profiles  # noqa: E402
 from sme.db import Queue, iso, utcnow  # noqa: E402
 from sme.downloader import DownloadError, DownloadResult  # noqa: E402
-from sme.extractor import ExtractionError  # noqa: E402
+from sme.extractor import Extraction, ExtractionError  # noqa: E402
 
 checks: list[tuple[bool, str]] = []
 
@@ -55,6 +56,31 @@ FAKE_JSON = {
     "transcript": "So here's the thing: don't.",
 }
 
+# A dev reel: one reference the caption links, one that exists only as spoken
+# words. The second is the case the whole design is about — it must survive to
+# the note as an unresolved entry rather than as an invented URL.
+FAKE_DEV_JSON = {
+    "has_usable_content": True,
+    "title": "Don't ship a vibecoded layout",
+    "summary": "Own the component source instead of pasting it.",
+    "tags": ["frontend", "repo-drop"],
+    "key_claims": [{"claim": "Own the component source", "kind": "tactic", "verbatim": False}],
+    "entities": {"tools": ["shadcn/ui"], "people": [], "platforms": []},
+    "references": [
+        {"raw": "shadcn/ui", "name": "shadcn-ui/ui", "kind": "repo",
+         "evidence": "on_screen", "note": "component source"},
+        {"raw": "that vite rsc plugin", "name": "", "kind": "repo",
+         "evidence": "spoken", "note": "used in the demo"},
+    ],
+    "urls_seen": ["https://bun.sh/docs"],
+    "on_screen_text": "npx shadcn add button",
+    "visual_context": "Terminal",
+    "language": "en",
+    "transcript": "so basically don't paste it",
+}
+
+DEV_CAPTION = "repo: https://github.com/shadcn-ui/ui — my course https://linktr.ee/guy"
+
 # --- stubs ------------------------------------------------------------------
 _behaviour = {"download": "ok"}
 
@@ -68,16 +94,26 @@ def fake_download(url, shortcode, media_dir, cookies, **kw):
     p.write_bytes(b"\x00" * 2048)
     return DownloadResult(path=p, info={
         "uploader_id": "o'brien.ads", "duration": 47,
-        "upload_date": "20260901", "description": "caption here",
+        "upload_date": "20260901",
+        "description": _behaviour.get("caption", "caption here"),
     })
 
 
 W.download = fake_download
-def fake_extract(*a, **k):
+PROFILES = load_profiles(REPO / "config" / "profiles")
+
+
+def fake_extract(video, *, profiles, profile=None, **k):
+    """Stands in for upload + route + generate. `_behaviour["route"]` is the router."""
     mode = _behaviour.get("extract", "ok")
     if mode != "ok":
         raise ExtractionError(f"simulated {mode}", mode)
-    return dict(FAKE_JSON)
+    name = profile or _behaviour.get("route", "marketing")
+    return Extraction(
+        profile=profiles[name],
+        data=dict(FAKE_DEV_JSON if name == "dev" else FAKE_JSON),
+        routed=profile is None,
+    )
 
 
 W.extract = fake_extract
@@ -97,9 +133,10 @@ q.enqueue("AAA11111", "https://www.instagram.com/reel/AAA11111/", 1)
 w.run(once=True)
 row = q.get("AAA11111")
 ok(row["status"] == "done", "happy path marks job done")
-notes = list(cfg.notes_dir.glob("*.md"))
+notes = list(cfg.notes_dir.rglob("*.md"))
 ok(len(notes) == 1, f"note written ({notes[0].name if notes else 'none'})")
 ok("o-brien-ads" in notes[0].name, "handle slugified into filename")
+ok(notes[0].parent == cfg.notes_dir / "marketing", "note filed under reels/<profile>/")
 body = notes[0].read_text()
 ok("prompt_version: 1" in body, "prompt_version recorded in frontmatter")
 ok("**[tactic]**" in body, "key claim rendered with its kind")
@@ -191,6 +228,35 @@ w.run(once=True)
 ok(not q.is_paused(), "a 503 capacity blip does NOT pause the worker")
 ok(q.get("GGG77777")["status"] == "retry", "503 schedules a normal backoff retry")
 _behaviour["extract"] = "ok"
+
+# 9b. profiles: routing, forcing, and the sources contract
+ok(set(PROFILES) >= {"marketing", "dev"}, f"profiles load ({', '.join(sorted(PROFILES))})")
+ok(parse_profile("look at this #dev", PROFILES) == "dev", "#dev hashtag forces a profile")
+ok(parse_profile("#webdev #coding", PROFILES) is None, "creator hashtags do not force a profile")
+
+ok("profile: marketing" in notes[0].read_text(), "routed profile recorded in frontmatter")
+ok("## Sources" not in notes[0].read_text(), "marketing note has no Sources section")
+
+_behaviour["caption"] = DEV_CAPTION
+q.enqueue("HHH88888", "https://www.instagram.com/reel/HHH88888/", 1, "dev")
+ok(q.get("HHH88888")["profile"] == "dev", "forced profile is stored on the job row")
+w.run(once=True)
+ok(q.get("HHH88888")["status"] == "done", "dev reel captured")
+dev_note = next(p for p in cfg.notes_dir.rglob("*HHH88888.md"))
+ok(dev_note.parent == cfg.notes_dir / "dev", "dev note filed under reels/dev/")
+dev = dev_note.read_text()
+dfm = yaml.safe_load(dev.split("---")[1])
+ok(dfm["profile"] == "dev", "forced profile lands in frontmatter")
+ok("## Sources" in dev, "dev note carries a Sources section")
+ok("https://github.com/shadcn-ui/ui" in dev, "caption link resolved onto the named reference")
+ok(dfm.get("sources") == ["https://github.com/shadcn-ui/ui", "https://bun.sh/docs"],
+   "only resolved URLs reach the sources frontmatter")
+ok("linktr.ee" not in dev, "the creator's funnel link is not kept as a source")
+ok("_unresolved_" in dev and "github.com/search?q=that+vite+rsc+plugin" in dev,
+   "a spoken-only reference stays unresolved with a search link")
+ok("https://github.com/that" not in dev, "no URL is invented for an unresolved reference")
+ok(dfm["tags"] == ["frontend", "repo-drop"], "dev note is tagged from the dev vocabulary")
+_behaviour["caption"] = "caption here"
 
 # 10. crash recovery
 q._conn.execute("UPDATE jobs SET status='running' WHERE shortcode='BBB22222'")

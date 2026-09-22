@@ -34,19 +34,29 @@ src/sme/
   worker.py       The serial job loop, retry policy, pause logic, media pruning
   db.py           SQLite queue. WAL, atomic claim, persisted rate-limit accounting
   downloader.py   yt-dlp wrapper. Error *classification* is the important part
-  extractor.py    Gemini prompt + response schema. Bump PROMPT_VERSION when edited
+  extractor.py    Routing + Gemini call + response schema, assembled per profile
+  resolver.py     Reference names → verified URLs. The only module that may emit one
   render.py       JSON → markdown. Frontmatter via yaml.safe_dump, never f-strings
   vault.py        git init / commit / push
   cookies.py      Netscape cookie validation, shared by doctor and bot
-  config.py       Environment → Config, tag vocabulary loading
+  config.py       Environment → Config, profile loading
   urls.py         Instagram URL → shortcode
-config/tags.yml   The tag vocabulary. Injected into the response schema as an enum
+config/profiles/  One YAML per niche: tag vocabulary, prompt, schema blocks
+  marketing.yml   Ads, offers, copy, audience growth. The original vocabulary
+  dev.yml         Software, tooling, AI coding. Extracts the sources it points at
 scripts/
   doctor.py       Preflight. Every external dependency, one line each
   m0_smoke.py     One reel → one note, standalone. No queue, no git, no container
+  selftest.py     The worker loop end to end, network stubbed
+  vault_index.py  Survey the vault without reading every note
+  migrate_profile_dirs.py  One-off: sort pre-existing flat notes into reels/<profile>/
 ```
 
-## Three decisions worth knowing before you edit anything
+Notes are written to `vault/reels/<profile>/` — one folder per profile, so the
+two niches stay apart in GitHub, in Obsidian and in a file listing. Readers walk
+the tree (`rglob`), so nothing on the query side cares about the nesting.
+
+## Four decisions worth knowing before you edit anything
 
 **The model returns JSON; we render the markdown.** Handles and transcripts are
 full of apostrophes, colons and emoji that silently produce invalid YAML when
@@ -56,6 +66,13 @@ broken document.
 **The tag vocabulary is an `enum` in the response schema, not an instruction in
 the prompt.** A prompt is a suggestion; a schema is enforced by the API. Tag
 drift stops being possible rather than becoming something to police.
+
+**The model never writes a URL.** A dev reel showing `npx shadcn@latest init`
+contains no link, and a model asked for one returns a plausible github.com path
+that 404s — indistinguishable, to a reader, from a real one. So extraction yields
+reference *names* plus any URL literally visible on screen, and `resolver.py`
+alone turns names into addresses, from the caption or (next) a package registry.
+Anything it cannot justify is rendered as `_unresolved_` with a search link.
 
 **Auth failures pause the whole system.** A dead cookie that keeps retrying is
 how a rate-limit becomes a permanent ban. On any auth or rate-limit error the

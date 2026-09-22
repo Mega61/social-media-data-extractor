@@ -1,118 +1,190 @@
 """Gemini extraction. The model returns validated JSON; markdown is rendered by us.
 
-Bump PROMPT_VERSION whenever PROMPT or the tag vocabulary changes. It is written
-into every note's frontmatter so you can find stale notes later.
+Two calls per reel, against one upload: a cheap router pass that picks the profile
+(marketing, dev, ...) and then the real extraction under that profile's prompt and
+schema. The upload is the expensive part, so routing costs close to nothing.
+
+Prompts and tag vocabularies live in `config/profiles/*.yml`, not here. Bump the
+profile's own `prompt_version` when you edit one — it is written into every note's
+frontmatter so you can find stale notes per niche later.
 """
 from __future__ import annotations
 
 import json
+import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 from google import genai
 from google.genai import types
 
-from .config import TagVocabulary
+from .config import Profile, pick_profile
 
-PROMPT_VERSION = 1
+log = logging.getLogger("sme.extractor")
 
 DEFAULT_MODEL = "gemini-3.6-flash"
 
 CLAIM_KINDS = ["tactic", "metric", "opinion", "tool"]
 
+REFERENCE_KINDS = ["repo", "package", "docs", "tool", "service", "article",
+                   "person", "dataset", "font", "course", "other"]
 
-def build_schema(tags: TagVocabulary) -> dict:
-    return {
-        "type": "OBJECT",
-        "required": ["title", "summary", "tags", "key_claims", "transcript",
-                     "on_screen_text", "visual_context", "language", "has_usable_content"],
-        "property_ordering": ["has_usable_content", "title", "summary", "tags", "key_claims",
-                              "entities", "on_screen_text", "visual_context", "language",
-                              "transcript"],
-        "properties": {
-            "has_usable_content": {
-                "type": "BOOLEAN",
-                "description": "False if the reel contains no executable or referenceable idea.",
-            },
-            "title": {"type": "STRING", "description": "Under 80 chars, descriptive, not clickbait."},
-            "summary": {"type": "STRING", "description": "2-3 sentences. What this reel actually teaches."},
-            "tags": {
-                "type": "ARRAY",
-                "minItems": 1,
-                "maxItems": 3,
-                "items": {"type": "STRING", "enum": list(tags.names)},
-            },
-            "key_claims": {
-                "type": "ARRAY",
-                "items": {
-                    "type": "OBJECT",
-                    "required": ["claim", "kind", "verbatim"],
-                    "properties": {
-                        "claim": {"type": "STRING"},
-                        "kind": {"type": "STRING", "enum": CLAIM_KINDS},
-                        "verbatim": {
-                            "type": "BOOLEAN",
-                            "description": "True only if `claim` is a word-for-word quote.",
-                        },
+# Where the model got a reference's name. The resolver weights lookups by this:
+# on-screen characters are exact, a spoken name is a phonetic guess.
+EVIDENCE_KINDS = ["on_screen", "caption", "spoken"]
+
+
+@dataclass
+class Extraction:
+    """What one reel produced, plus which profile produced it."""
+    profile: Profile
+    data: dict
+    routed: bool = False   # True when the router chose the profile, not a human
+
+
+# --- schema ------------------------------------------------------------------
+
+def build_schema(profile: Profile) -> dict:
+    props: dict = {
+        "has_usable_content": {
+            "type": "BOOLEAN",
+            "description": "False if the reel contains no executable or referenceable idea.",
+        },
+        "title": {"type": "STRING", "description": "Under 80 chars, descriptive, not clickbait."},
+        "summary": {"type": "STRING", "description": "2-3 sentences. What this reel actually teaches."},
+        "tags": {
+            "type": "ARRAY",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": {"type": "STRING", "enum": list(profile.tags.names)},
+        },
+        "key_claims": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "required": ["claim", "kind", "verbatim"],
+                "properties": {
+                    "claim": {"type": "STRING"},
+                    "kind": {"type": "STRING", "enum": CLAIM_KINDS},
+                    "verbatim": {
+                        "type": "BOOLEAN",
+                        "description": "True only if `claim` is a word-for-word quote.",
                     },
                 },
             },
-            "entities": {
+        },
+        "on_screen_text": {"type": "STRING", "description": "All burned-in text, in order. Empty string if none."},
+        "visual_context": {"type": "STRING", "description": "What is shown, only where it carries meaning the audio does not."},
+        "language": {"type": "STRING", "description": "ISO 639-1 code of the spoken language."},
+        "transcript": {"type": "STRING", "description": "Verbatim spoken words. No speaker labels, no timestamps."},
+    }
+    required = ["title", "summary", "tags", "key_claims", "transcript",
+                "on_screen_text", "visual_context", "language", "has_usable_content"]
+    ordering = ["has_usable_content", "title", "summary", "tags", "key_claims"]
+
+    if profile.has("entities"):
+        props["entities"] = {
+            "type": "OBJECT",
+            "properties": {
+                "tools": {"type": "ARRAY", "items": {"type": "STRING"}},
+                "people": {"type": "ARRAY", "items": {"type": "STRING"}},
+                "platforms": {"type": "ARRAY", "items": {"type": "STRING"}},
+            },
+        }
+        ordering.append("entities")
+
+    if profile.has("references"):
+        props["references"] = {
+            "type": "ARRAY",
+            "description": "Everything the reel points at by name. Never a URL you did not see.",
+            "items": {
                 "type": "OBJECT",
+                "required": ["raw", "kind", "evidence"],
                 "properties": {
-                    "tools": {"type": "ARRAY", "items": {"type": "STRING"}},
-                    "people": {"type": "ARRAY", "items": {"type": "STRING"}},
-                    "platforms": {"type": "ARRAY", "items": {"type": "STRING"}},
+                    "raw": {"type": "STRING", "description": "The name exactly as shown or said. Never tidied."},
+                    "name": {"type": "STRING", "description": "Canonical lookup name, or empty when unsure."},
+                    "kind": {"type": "STRING", "enum": REFERENCE_KINDS},
+                    "evidence": {"type": "STRING", "enum": EVIDENCE_KINDS},
+                    "note": {"type": "STRING", "description": "One line on what it is for in this reel."},
                 },
             },
-            "on_screen_text": {"type": "STRING", "description": "All burned-in text, in order. Empty string if none."},
-            "visual_context": {"type": "STRING", "description": "What is shown, only where it carries meaning the audio does not."},
-            "language": {"type": "STRING", "description": "ISO 639-1 code of the spoken language."},
-            "transcript": {"type": "STRING", "description": "Verbatim spoken words. No speaker labels, no timestamps."},
-        },
+        }
+        props["urls_seen"] = {
+            "type": "ARRAY",
+            "description": "Complete URLs literally visible on screen, character for character. Never constructed.",
+            "items": {"type": "STRING"},
+        }
+        # Required so an absence is an explicit empty array rather than a field the
+        # model quietly dropped — the two are indistinguishable downstream otherwise.
+        required += ["references", "urls_seen"]
+        ordering += ["references", "urls_seen"]
+
+    ordering += ["on_screen_text", "visual_context", "language", "transcript"]
+    return {
+        "type": "OBJECT",
+        "required": required,
+        "property_ordering": ordering,
+        "properties": props,
     }
 
 
-PROMPT = """\
-You are extracting durable, searchable knowledge from a short-form social video \
-(an Instagram reel) so it can be referenced months from now without rewatching it.
+# --- routing -----------------------------------------------------------------
 
-Return JSON matching the provided schema. Rules:
+ROUTER_PROMPT = """\
+Classify this short-form video into exactly one category, by what the video is *about*.
 
-1. TRANSCRIPT is verbatim. Transcribe what is actually said, including filler, in the \
-original language. Do not translate, summarise, clean up or paraphrase it. If there is \
-no speech, return an empty string.
+{profile_block}
 
-2. ON-SCREEN TEXT is separate from the transcript. Reels routinely carry the real \
-content as burned-in captions while the audio is music only. Capture it in reading order.
+Pick the single best fit. If the video genuinely straddles two, pick the one whose \
+subject matter the viewer would search for later. Answer with the category name only.
 
-3. KEY CLAIMS are the reusable assertions, each standing on its own without the video. \
-Classify each honestly:
-   - tactic  : a repeatable action ("open with a question the viewer has already asked themselves")
-   - metric  : a number or result being asserted ("this cut CPA by 40%")
-   - opinion : a belief or preference stated as fact, with nothing to execute
-   - tool    : a claim that a specific named product does something
-   Set `verbatim` true only when `claim` is word-for-word from the video.
-   Do not invent claims to fill the list. A reel with one real idea has one claim.
-   Do not soften or launder a marketing number into a neutral statement — record it as \
-a `metric` claim exactly as asserted.
-
-4. TAGS: choose 1-3 from this fixed vocabulary, by what the reel is *for*:
-{tag_block}
-
-5. HAS_USABLE_CONTENT is false when the reel is engagement bait, a pure advertisement \
-for a course or coaching, or has no idea a reader could act on or cite. When false, still \
-fill in the other fields as best you can and include `low-signal` in tags.
-
-6. Never state anything the video does not support. Absent information is an empty string \
-or an empty array, never a guess.
-
-Metadata about this reel, for your context only (do not restate it in the output):
+Metadata for your context only:
 - creator handle: @{handle}
 - caption: {caption}
 """
 
+
+def build_router_schema(profiles: dict[str, Profile]) -> dict:
+    return {
+        "type": "OBJECT",
+        "required": ["profile"],
+        "properties": {"profile": {"type": "STRING", "enum": sorted(profiles)}},
+    }
+
+
+def route(
+    client: genai.Client,
+    model: str,
+    uploaded,
+    profiles: dict[str, Profile],
+    *,
+    handle: str,
+    caption: str,
+    fallback: str,
+) -> str:
+    """Pick a profile for an already-uploaded video. Never raises."""
+    if len(profiles) < 2:
+        return next(iter(profiles))
+    block = "\n".join(f"- {p.name}: {p.when}" for p in profiles.values())
+    prompt = ROUTER_PROMPT.format(
+        profile_block=block, handle=handle, caption=(caption[:800] or "(none)"),
+    )
+    try:
+        resp = _generate(client, model, uploaded, prompt,
+                         build_router_schema(profiles), max_output_tokens=64)
+        name = (json.loads(resp.text or "{}") or {}).get("profile")
+    except Exception as e:  # noqa: BLE001 - a failed route must not fail the capture
+        log.warning("router failed, falling back to %s: %s", fallback, str(e)[:200])
+        return fallback
+    if name not in profiles:
+        log.warning("router returned unknown profile %r, falling back to %s", name, fallback)
+        return fallback
+    return name
+
+
+# --- errors ------------------------------------------------------------------
 
 class ExtractionError(Exception):
     def __init__(self, message: str, error_class: str = "extraction"):
@@ -151,6 +223,8 @@ def available_models(api_key: str) -> list[str]:
         return []
 
 
+# --- calls -------------------------------------------------------------------
+
 def _upload_and_wait(client: genai.Client, path: Path, *, timeout_s: int = 300) -> types.File:
     f = client.files.upload(file=str(path))
     deadline = time.monotonic() + timeout_s
@@ -165,15 +239,17 @@ def _upload_and_wait(client: genai.Client, path: Path, *, timeout_s: int = 300) 
     return f
 
 
-def _generate(client, model: str, uploaded, prompt: str, tags: TagVocabulary):
+def _generate(client, model: str, uploaded, prompt: str, schema: dict,
+              *, max_output_tokens: Optional[int] = None):
     try:
         return client.models.generate_content(
             model=model,
             contents=[uploaded, prompt],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_schema=build_schema(tags),
+                response_schema=schema,
                 temperature=0.2,
+                max_output_tokens=max_output_tokens,
                 # Extraction is not a reasoning task. Disabling thinking cuts token
                 # spend with no measurable quality loss here (verified: 0 thought
                 # tokens, same structured output).
@@ -189,25 +265,82 @@ def _generate(client, model: str, uploaded, prompt: str, tags: TagVocabulary):
         raise ExtractionError(str(e), classify_gemini_error(e)) from e
 
 
+# --- normalisation -----------------------------------------------------------
+
+def _clean_references(data: dict) -> None:
+    """Drop malformed entries and force the enums into range.
+
+    The schema constrains shape, not sanity: a reference whose `raw` is empty
+    carries no evidence of anything and cannot be looked up, so it is noise.
+    """
+    out = []
+    for r in data.get("references") or []:
+        if not isinstance(r, dict):
+            continue
+        raw = (r.get("raw") or "").strip()
+        if not raw:
+            continue
+        kind = r.get("kind") if r.get("kind") in REFERENCE_KINDS else "other"
+        ev = r.get("evidence") if r.get("evidence") in EVIDENCE_KINDS else "spoken"
+        out.append({
+            "raw": raw,
+            "name": (r.get("name") or "").strip(),
+            "kind": kind,
+            "evidence": ev,
+            "note": (r.get("note") or "").strip(),
+        })
+    data["references"] = out
+    data["urls_seen"] = [
+        u.strip() for u in (data.get("urls_seen") or [])
+        if isinstance(u, str) and u.strip().lower().startswith(("http://", "https://"))
+    ]
+
+
+def normalise(data: dict, profile: Profile) -> dict:
+    data.setdefault("entities", {})
+    for k in ("tools", "people", "platforms"):
+        data["entities"].setdefault(k, [])
+    data["tags"] = [t for t in data.get("tags", []) if t in profile.tags.names] or ["inbox"]
+    if not data.get("has_usable_content", True) and "low-signal" not in data["tags"]:
+        # Every vocabulary carries low-signal; guard anyway so a profile that
+        # drops it cannot produce a tag outside its own enum.
+        if "low-signal" in profile.tags.names:
+            data["tags"].append("low-signal")
+    if profile.has("references"):
+        _clean_references(data)
+    return data
+
+
+# --- entry point -------------------------------------------------------------
+
 def extract(
     video: Path,
     *,
     api_key: str,
     model: str,
-    tags: TagVocabulary,
+    profiles: dict[str, Profile],
     handle: str,
     caption: str = "",
+    profile: Optional[str] = None,
+    auto_route: bool = True,
+    default_profile: str = "marketing",
     client: Optional[genai.Client] = None,
-) -> dict:
+) -> Extraction:
+    """Upload once, route (unless the profile was forced), extract under that profile."""
     client = client or genai.Client(api_key=api_key)
     uploaded = _upload_and_wait(client, video)
-    prompt = PROMPT.format(
-        tag_block=tags.prompt_block(),
-        handle=handle,
-        caption=(caption[:1500] or "(none)"),
-    )
+    routed = False
     try:
-        resp = _generate(client, model, uploaded, prompt, tags)
+        name = profile if profile in profiles else None
+        if name is None and auto_route:
+            name = route(client, model, uploaded, profiles,
+                         handle=handle, caption=caption, fallback=default_profile)
+            routed = True
+        prof = pick_profile(profiles, name, default_profile)
+        log.info("profile=%s (%s)", prof.name, "routed" if routed else "forced")
+        resp = _generate(client, model, uploaded,
+                         prof.render_prompt(handle=handle, caption=caption),
+                         build_schema(prof))
     finally:
         try:
             client.files.delete(name=uploaded.name)
@@ -223,11 +356,4 @@ def extract(
     except json.JSONDecodeError as e:
         raise ExtractionError(f"Gemini returned non-JSON: {e}: {raw[:300]}")
 
-    # The schema guarantees shape but not sanity; normalise the parts we render.
-    data.setdefault("entities", {})
-    for k in ("tools", "people", "platforms"):
-        data["entities"].setdefault(k, [])
-    data["tags"] = [t for t in data.get("tags", []) if t in tags.names] or ["inbox"]
-    if not data.get("has_usable_content", True) and "low-signal" not in data["tags"]:
-        data["tags"].append("low-signal")
-    return data
+    return Extraction(profile=prof, data=normalise(data, prof), routed=routed)

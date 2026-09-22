@@ -7,23 +7,27 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from .config import Config
+from .config import Config, load_profiles
 from .cookies import validate as validate_cookies
 from .db import Queue
 from .urls import extract as extract_urls
 
 log = logging.getLogger("sme.bot")
 
+HASHTAG_RE = re.compile(r"#([A-Za-z][A-Za-z0-9_-]{1,30})")
+
 HELP = (
     "*Reel capture*\n\n"
     "Share a reel from Instagram to this chat and it gets transcribed, tagged and "
     "filed in the vault. No reply needed from you.\n\n"
+    "{profiles}"
     "/status — queue depth, pause state, today's download budget\n"
     "/failed — recent failures and why\n"
     "/retry `<shortcode>` — requeue one reel\n"
@@ -33,6 +37,24 @@ HELP = (
     "\n\n_To refresh the Instagram session: export cookies.txt from the burner "
     "account and send the file to this chat._"
 )
+
+
+def profile_help(profiles) -> str:
+    names = " ".join(f"#{n}" for n in profiles)
+    return (f"Add {names} to the message to force how a reel is read; "
+            "otherwise it is classified automatically.\n\n")
+
+
+def parse_profile(text: str, profiles) -> "str | None":
+    """A hashtag naming a profile forces it. Unknown hashtags are ignored.
+
+    Captions arrive full of the creator's own hashtags, so only an exact profile
+    name counts, and the first one wins.
+    """
+    for tag in HASHTAG_RE.findall(text or ""):
+        if tag.lower() in profiles:
+            return tag.lower()
+    return None
 
 
 def _message_text(update: Update) -> str:
@@ -51,6 +73,8 @@ class Bot:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.q = Queue(cfg.db_path)
+        self.profiles = load_profiles(cfg.profiles_dir)
+        self.help = HELP.format(profiles=profile_help(self.profiles))
 
     def authorised(self, update: Update) -> bool:
         user = update.effective_user
@@ -76,7 +100,7 @@ class Bot:
     async def cmd_start(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._guard(update):
             return
-        await update.effective_message.reply_text(HELP, parse_mode=ParseMode.MARKDOWN)
+        await update.effective_message.reply_text(self.help, parse_mode=ParseMode.MARKDOWN)
 
     async def cmd_whoami(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         u = update.effective_user
@@ -189,17 +213,22 @@ class Bot:
         if not await self._guard(update):
             return
         msg = update.effective_message
-        found = extract_urls(_message_text(update))
+        text = _message_text(update)
+        found = extract_urls(text)
         if not found:
             await msg.reply_text("No Instagram reel link in that message.")
             return
 
+        # A forced profile applies to every reel in the message. Shared posts carry
+        # the creator's caption, so only a hashtag naming a profile counts.
+        profile = parse_profile(msg.text or msg.caption or "", self.profiles)
+
         replies = []
         for shortcode, url in found:
-            created, row = self.q.enqueue(shortcode, url, msg.chat_id)
+            created, row = self.q.enqueue(shortcode, url, msg.chat_id, profile)
             if created:
-                replies.append(f"Queued `{shortcode}`.")
-                log.info("queued %s", shortcode)
+                replies.append(f"Queued `{shortcode}`" + (f" as `{profile}`." if profile else "."))
+                log.info("queued %s (profile=%s)", shortcode, profile or "auto")
             elif row["status"] == "done":
                 replies.append(f"Already captured `{shortcode}` → `{(row['note_path'] or '').split('/')[-1]}`")
             else:

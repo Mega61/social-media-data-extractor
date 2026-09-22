@@ -1,0 +1,92 @@
+# Profile: marketing / creator-economy reels.
+#
+# This is the vocabulary and prompt the vault was built on. Notes captured before
+# profiles existed have no `profile:` field in their frontmatter and are treated
+# as belonging to this one.
+#
+# Editing: change this file, then restart the worker (profiles are read at startup).
+# Bump `prompt_version` whenever `prompt` or `blocks` changes, and `version`
+# whenever the tag list changes, so you can tell which notes came from which.
+name: marketing
+label: Marketing & creator economy
+version: 1
+prompt_version: 1
+
+# The router sees only this line when choosing a profile for a reel. Keep it
+# short and disjoint from every other profile's `when` — overlapping descriptions
+# are what cause routing drift, exactly as they do for tags.
+when: >
+  Marketing, selling, audience growth, content strategy, ads, copywriting,
+  offers, funnels, sales or business mindset. The subject is how to sell
+  something or how to grow an audience.
+
+# Optional schema sections to enable beyond the core fields.
+blocks: [entities]
+
+tags:
+  - name: ads
+    when: Paid advertising. Creative testing, targeting, budget, bidding, ad managers.
+  - name: personal-brand
+    when: Building an individual's audience, positioning, or authority.
+  - name: copywriting
+    when: The words themselves. Headlines, body copy, CTAs, email subject lines.
+  - name: offer-design
+    when: What is being sold and how it is packaged. Pricing, bonuses, guarantees.
+  - name: funnels
+    when: Multi-step conversion paths. Landing pages, lead magnets, email sequences.
+  - name: content-strategy
+    when: What to post, how often, on which platform, and why.
+  - name: hooks-scripting
+    when: The first three seconds. Hook formulas, retention structure, video scripting.
+  - name: analytics
+    when: Measurement. Metrics, attribution, dashboards, interpreting numbers.
+  - name: automation
+    when: Tooling that removes manual work. Workflows, integrations, AI pipelines.
+  - name: sales
+    when: One-to-one conversion. DM scripts, calls, objection handling, closing.
+  - name: tooling
+    when: A specific named product or app is the subject of the reel.
+  - name: mindset
+    when: Motivation, discipline, identity, general life advice. No executable tactic.
+  - name: low-signal
+    when: Nothing usable. Pure engagement bait, an ad for a course, or unintelligible.
+  - name: inbox
+    when: Genuinely useful but fits none of the above. Needs a human to file it.
+
+prompt: |
+  You are extracting durable, searchable knowledge from a short-form social video (an
+  Instagram reel) so it can be referenced months from now without rewatching it.
+
+  Return JSON matching the provided schema. Rules:
+
+  1. TRANSCRIPT is verbatim. Transcribe what is actually said, including filler, in the
+  original language. Do not translate, summarise, clean up or paraphrase it. If there is
+  no speech, return an empty string.
+
+  2. ON-SCREEN TEXT is separate from the transcript. Reels routinely carry the real
+  content as burned-in captions while the audio is music only. Capture it in reading order.
+
+  3. KEY CLAIMS are the reusable assertions, each standing on its own without the video.
+  Classify each honestly:
+     - tactic  : a repeatable action ("open with a question the viewer has already asked themselves")
+     - metric  : a number or result being asserted ("this cut CPA by 40%")
+     - opinion : a belief or preference stated as fact, with nothing to execute
+     - tool    : a claim that a specific named product does something
+     Set `verbatim` true only when `claim` is word-for-word from the video.
+     Do not invent claims to fill the list. A reel with one real idea has one claim.
+     Do not soften or launder a marketing number into a neutral statement — record it as
+  a `metric` claim exactly as asserted.
+
+  4. TAGS: choose 1-3 from this fixed vocabulary, by what the reel is *for*:
+  {tag_block}
+
+  5. HAS_USABLE_CONTENT is false when the reel is engagement bait, a pure advertisement
+  for a course or coaching, or has no idea a reader could act on or cite. When false, still
+  fill in the other fields as best you can and include `low-signal` in tags.
+
+  6. Never state anything the video does not support. Absent information is an empty string
+  or an empty array, never a guess.
+
+  Metadata about this reel, for your context only (do not restate it in the output):
+  - creator handle: @{handle}
+  - caption: {caption}

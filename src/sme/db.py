@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     media_path      TEXT,
     media_pruned    INTEGER NOT NULL DEFAULT 0,
     chat_id         INTEGER,
+    profile         TEXT,                              -- forced by the sender; NULL means route it
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     done_at         TEXT
@@ -41,6 +42,13 @@ CREATE INDEX IF NOT EXISTS idx_downloads_at ON downloads(at);
 
 TERMINAL = ("done", "failed", "skipped")
 
+# Columns added after the first release. SCHEMA only runs CREATE TABLE IF NOT
+# EXISTS, so an existing queue.db never picks them up on its own; each is applied
+# once, guarded by what the table actually has.
+MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("profile", "ALTER TABLE jobs ADD COLUMN profile TEXT"),
+)
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -60,6 +68,13 @@ class Queue:
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        have = {r["name"] for r in self._conn.execute("PRAGMA table_info(jobs)")}
+        for column, ddl in MIGRATIONS:
+            if column not in have:
+                self._conn.execute(ddl)
 
     def close(self) -> None:
         self._conn.close()
@@ -76,14 +91,20 @@ class Queue:
             self._conn.execute("COMMIT")
 
     # --- jobs -----------------------------------------------------------
-    def enqueue(self, shortcode: str, url: str, chat_id: Optional[int]) -> tuple[bool, sqlite3.Row]:
-        """Insert a job. Returns (created, row). Re-sharing an existing reel is a no-op."""
+    def enqueue(self, shortcode: str, url: str, chat_id: Optional[int],
+                profile: Optional[str] = None) -> tuple[bool, sqlite3.Row]:
+        """Insert a job. Returns (created, row). Re-sharing an existing reel is a no-op.
+
+        `profile` is a forced niche from the sender; NULL leaves the choice to the
+        router. It is stored rather than resolved now so /retry re-runs the reel
+        under the same profile the sender asked for.
+        """
         now = iso(utcnow())
         with self._tx() as c:
             cur = c.execute(
-                "INSERT OR IGNORE INTO jobs (shortcode, source_url, chat_id, created_at, updated_at)"
-                " VALUES (?,?,?,?,?)",
-                (shortcode, url, chat_id, now, now),
+                "INSERT OR IGNORE INTO jobs (shortcode, source_url, chat_id, profile, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (shortcode, url, chat_id, profile, now, now),
             )
             created = cur.rowcount == 1
         return created, self.get(shortcode)

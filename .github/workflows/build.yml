@@ -44,3 +44,14 @@ jobs:
           docker run --rm --entrypoint python \
             ghcr.io/mega61/social-media-data-extractor:main \
             -c "import sme.bot, sme.worker; print('image imports OK')"
+
+      # Profiles are parsed at startup, so a YAML typo or a prompt missing its
+      # {tag_block} placeholder would crash-loop the homelab rather than fail
+      # here. They are also the file most likely to be edited.
+      - name: Profiles load inside the image
+        run: |
+          docker run --rm --entrypoint python \
+            ghcr.io/mega61/social-media-data-extractor:main \
+            -c "from sme.config import load_profiles; from pathlib import Path; \
+                p = load_profiles(Path('/app/config/profiles')); \
+                print('profiles OK:', ', '.join(p))"

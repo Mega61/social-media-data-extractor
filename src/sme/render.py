@@ -30,6 +30,32 @@ def _section(title: str, body: str) -> str:
     return f"## {title}\n\n{body if body else '_none_'}\n"
 
 
+def render_sources(sources: list[dict]) -> str:
+    """One line per source, resolved or not.
+
+    An unresolved reference is rendered as loudly as a resolved one, with a search
+    link instead of an address. The alternative — dropping it — loses the only
+    record that the reel pointed at something, and a name is enough to find it by
+    hand. Nothing here is ever rendered as a URL that was not actually obtained.
+    """
+    if not sources:
+        return "_none_"
+    lines = []
+    for s in sources:
+        label = s.get("raw") or s.get("name") or "unknown"
+        kind = s.get("kind") or "other"
+        note = f" — {s['note']}" if s.get("note") else ""
+        if s.get("url"):
+            meta = " · ".join(x for x in (s.get("confidence"), s.get("via")) if x)
+            lines.append(f"- **{label}** — {kind} · {s['url']} `{meta}`{note}")
+        else:
+            lines.append(
+                f"- **{label}** — {kind} · _unresolved_ · [search]({s.get('search_url','')}) "
+                f"`{s.get('evidence','spoken')}`{note}"
+            )
+    return "\n".join(lines)
+
+
 def render(
     data: dict,
     *,
@@ -40,9 +66,15 @@ def render(
     model: str,
     prompt_version: int,
     tag_vocab_version: int,
+    profile: str = "marketing",
+    sources: Optional[list[dict]] = None,
     duration_s: Optional[int] = None,
     published_at: Optional[str] = None,
 ) -> str:
+    # Only resolved URLs reach the frontmatter: it is the machine-readable index
+    # the vault-wide link library is built from, and a search link is not a source.
+    source_urls = list(dict.fromkeys(s["url"] for s in (sources or []) if s.get("url")))
+
     front = {
         "source_url": source_url,
         "shortcode": shortcode,
@@ -52,8 +84,10 @@ def render(
         "published_at": published_at,
         "duration_s": duration_s,
         "language": data.get("language", ""),
+        "profile": profile,
         "tags": list(data.get("tags", [])),
         "has_usable_content": bool(data.get("has_usable_content", True)),
+        "sources": source_urls if sources is not None else None,
         "model": model,
         "prompt_version": prompt_version,
         "tag_vocab_version": tag_vocab_version,
@@ -85,6 +119,12 @@ def render(
         f"> [Watch on Instagram]({source_url}) · @{handle}\n",
         _section("Summary", data.get("summary", "")),
         f"## Key claims\n\n{claims_md}\n",
+    ]
+    # Sources lead the reference material for dev notes: months later the link is
+    # the reason the note exists, and it should not be below a 900-word transcript.
+    if sources is not None:
+        parts.append(f"## Sources\n\n{render_sources(sources)}\n")
+    parts += [
         f"## Entities\n\n{entities_md}\n",
         _section("On-screen text", data.get("on_screen_text", "")),
         _section("Visual context", data.get("visual_context", "")),

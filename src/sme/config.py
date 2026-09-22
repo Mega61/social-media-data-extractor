@@ -2,12 +2,26 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+DEFAULT_PROFILE = "marketing"
+
+
+def _safe_dirname(profile: str) -> str:
+    """A profile name reduced to something safe to join onto a path.
+
+    Profile names are ours (a `name:` in config/profiles/*.yml), but they also
+    arrive from a Telegram hashtag and a stored job row, so this never trusts them
+    with path separators.
+    """
+    name = re.sub(r"[^a-z0-9_-]+", "-", (profile or "").lower()).strip("-")
+    return name or DEFAULT_PROFILE
 
 
 def _req(name: str) -> str:
@@ -27,6 +41,13 @@ def _int(name: str, default: int) -> int:
     return int(raw) if raw else default
 
 
+def _bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
 @dataclass(frozen=True)
 class Config:
     telegram_token: str
@@ -42,7 +63,9 @@ class Config:
     git_branch: str
     git_author_name: str
     git_author_email: str
-    tags_file: Path
+    profiles_dir: Path
+    default_profile: str
+    auto_route: bool
     vault_uid: "int | None"
     vault_gid: "int | None"
 
@@ -61,7 +84,18 @@ class Config:
 
     @property
     def notes_dir(self) -> Path:
+        """Root of the note tree. Notes themselves live one level down, per profile."""
         return self.vault_dir / "reels"
+
+    def notes_dir_for(self, profile: str) -> Path:
+        """`reels/<profile>/` — where a note for that profile is written.
+
+        Profiles have disjoint tag vocabularies and answer different questions, so
+        a flat directory forces every reader (GitHub, Obsidian, a human) to open a
+        note to find out which kind it is. Readers walk the tree, so the split
+        costs nothing on the query side.
+        """
+        return self.notes_dir / _safe_dirname(profile)
 
     @property
     def cookies_path(self) -> Path:
@@ -76,7 +110,7 @@ class Config:
         raw_ids = os.environ.get("TELEGRAM_ALLOWED_USER_IDS", "").strip()
         ids = frozenset(int(x) for x in raw_ids.replace(" ", "").split(",") if x)
 
-        default_tags = REPO_ROOT / "config" / "tags.yml"
+        default_profiles = REPO_ROOT / "config" / "profiles"
         return cls(
             telegram_token=_req("TELEGRAM_BOT_TOKEN") if require_telegram
             else os.environ.get("TELEGRAM_BOT_TOKEN", ""),
@@ -93,7 +127,9 @@ class Config:
             git_branch=os.environ.get("GIT_BRANCH", "main").strip() or "main",
             git_author_name=os.environ.get("GIT_AUTHOR_NAME", "reel-bot"),
             git_author_email=os.environ.get("GIT_AUTHOR_EMAIL", "reel-bot@localhost"),
-            tags_file=Path(os.environ.get("TAGS_FILE", str(default_tags))),
+            profiles_dir=Path(os.environ.get("PROFILES_DIR", str(default_profiles))),
+            default_profile=os.environ.get("DEFAULT_PROFILE", DEFAULT_PROFILE).strip() or DEFAULT_PROFILE,
+            auto_route=_bool("AUTO_ROUTE", True),
             vault_uid=_opt_int("VAULT_UID"),
             vault_gid=_opt_int("VAULT_GID"),
         )
@@ -109,14 +145,85 @@ class TagVocabulary:
         return "\n".join(f"- {n}: {d}" for n, d in self.descriptions)
 
 
-def load_tags(path: Path) -> TagVocabulary:
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+@dataclass(frozen=True)
+class Profile:
+    """One niche: its tag vocabulary, its prompt, and which schema blocks it uses.
+
+    A profile is the unit that gets versioned. `version` tracks the tag vocabulary
+    and `prompt_version` the prompt and schema, and both land in every note's
+    frontmatter, so a vault mixing niches can still be queried for stale notes
+    one niche at a time.
+    """
+    name: str
+    label: str
+    version: int
+    prompt_version: int
+    when: str
+    blocks: frozenset[str]
+    tags: TagVocabulary
+    prompt: str
+
+    def has(self, block: str) -> bool:
+        return block in self.blocks
+
+    def render_prompt(self, *, handle: str, caption: str) -> str:
+        return self.prompt.format(
+            tag_block=self.tags.prompt_block(),
+            handle=handle,
+            caption=(caption[:1500] or "(none)"),
+        )
+
+
+def _load_profile(path: Path) -> Profile:
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    for key in ("name", "when", "prompt", "tags"):
+        if not data.get(key):
+            raise RuntimeError(f"{path} is missing required key `{key}`")
     entries = data["tags"]
-    if not entries:
-        raise RuntimeError(f"{path} defines no tags")
     pairs = tuple((e["name"], e.get("when", "")) for e in entries)
-    return TagVocabulary(
+    prompt = data["prompt"]
+    if "{tag_block}" not in prompt:
+        # Without it the model never sees the vocabulary and tags become noise.
+        raise RuntimeError(f"{path}: prompt does not contain the {{tag_block}} placeholder")
+    return Profile(
+        name=str(data["name"]),
+        label=str(data.get("label", data["name"])),
         version=int(data.get("version", 1)),
-        names=tuple(n for n, _ in pairs),
-        descriptions=pairs,
+        prompt_version=int(data.get("prompt_version", 1)),
+        when=" ".join(str(data["when"]).split()),
+        blocks=frozenset(data.get("blocks") or []),
+        tags=TagVocabulary(
+            version=int(data.get("version", 1)),
+            names=tuple(n for n, _ in pairs),
+            descriptions=pairs,
+        ),
+        prompt=prompt,
     )
+
+
+def load_profiles(path: Path) -> dict[str, Profile]:
+    """Load every profile in `path`. Keyed by profile name, insertion-ordered by filename."""
+    files = sorted(p for p in Path(path).glob("*.yml") if not p.name.startswith("_"))
+    if not files:
+        raise RuntimeError(f"no profiles found in {path}")
+    profiles: dict[str, Profile] = {}
+    for f in files:
+        p = _load_profile(f)
+        if p.name in profiles:
+            raise RuntimeError(f"duplicate profile name `{p.name}` in {f}")
+        profiles[p.name] = p
+    return profiles
+
+
+def pick_profile(profiles: dict[str, Profile], name: "str | None", fallback: str) -> Profile:
+    """Resolve a profile name to a Profile, never raising on unknown input.
+
+    Names reach here from a Telegram hashtag, a stored job row and the router,
+    none of which are trustworthy. An unrecognised one falls back rather than
+    failing a job that is otherwise fine.
+    """
+    if name and name in profiles:
+        return profiles[name]
+    if fallback in profiles:
+        return profiles[fallback]
+    return next(iter(profiles.values()))

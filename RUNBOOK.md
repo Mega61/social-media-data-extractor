@@ -303,7 +303,7 @@ Every required line must be green:
   PASS  yt-dlp installed                        version 2026.08.19
   WARN  ffmpeg installed (optional)          not on PATH — fine: formats are pinned to pre-muxed
   PASS  git installed                           git version 2.39.5
-  PASS  tag vocabulary loads                    v1, 14 tags: ads, personal-brand, …
+  PASS  profiles load                          dev (v1/p1, 12 tags, sources) · marketing (v1/p1, 14 tags)
   PASS  data directories writable               /data (media, vault, vault/reels present)
   PASS  queue database opens                    /data/queue.db | empty | running
   PASS  Instagram cookie present and unexpired  sessionid valid for 58 more days
@@ -339,9 +339,12 @@ red line names exactly one thing to go fix.
 5. Read the note. In the worker console:
 
    ```bash
-   ls -la /data/vault/reels/
-   cat /data/vault/reels/*.md
+   ls -la /data/vault/reels/*/
+   cat /data/vault/reels/*/*.md
    ```
+
+   Notes are filed under `reels/<profile>/` — `marketing/`, `dev/`, one folder
+   per profile in `config/profiles/`.
 
 6. Confirm it was committed:
 
@@ -366,15 +369,74 @@ note and answer honestly:
 - Are the **key claims** things you would genuinely want to find again in six
   months, or filler the model generated to populate the array?
 
-If any answer is no, that is prompt work, not plumbing work: edit `PROMPT` in
-`src/sme/extractor.py`, bump `PROMPT_VERSION`, push, and redeploy the stack.
-This is milestone **M1**, and it is worth spending real time on — every note you
-capture under a bad prompt is a note you will want to re-extract later.
+If any answer is no, that is prompt work, not plumbing work: edit `prompt:` in
+that profile's `config/profiles/<name>.yml`, bump its `prompt_version`, push, and
+redeploy the stack. This is milestone **M1**, and it is worth spending real time
+on — every note you capture under a bad prompt is a note you will want to
+re-extract later.
 
 Repeat 8b over 8–10 reels spanning ad tactics, personal brand, and pure
 motivational filler before you consider the system trustworthy.
 
-### 8d. Verify the safety mechanisms
+### 8d. Profiles, and the dev reels in particular
+
+Every reel is classified into one profile before extraction. `marketing` is the
+original vocabulary; `dev` is for software, tooling and AI-coding reels, and its
+job is different — it records what the reel *points at*, and writes a `## Sources`
+section of links.
+
+The router picks one automatically. To force it, put the profile name as a
+hashtag in the message you send the bot:
+
+```
+https://www.instagram.com/reel/XXXX/  #dev
+```
+
+The profile also decides where the note is filed. Notes land in
+`reels/<profile>/` — `reels/marketing/`, `reels/dev/` — one folder per profile in
+`config/profiles/`, created on worker start whether or not anything has been
+captured into it yet. GitHub and the Obsidian file pane then separate the two
+niches without a query, which matters because their tag vocabularies are disjoint.
+
+Notes captured before this landed sit flat in `reels/`. Sort them, on the
+homelab, against the vault the worker writes to:
+
+```bash
+# Stop the stack first — the migration rewrites paths the worker is committing to.
+docker stop sme-worker sme-bot
+python scripts/migrate_profile_dirs.py /srv/reel-vault          # plan only
+python scripts/migrate_profile_dirs.py /srv/reel-vault --apply  # git mv + commit
+git -C /srv/reel-vault push
+```
+
+It reads each note's own `profile:` field and treats a note without one as
+`marketing`, which is what it is. It uses `git mv`, so the notes keep their
+history, and it touches no frontmatter. Run it **on the homelab**, not on a read
+clone — the worker pushes from `/srv/reel-vault`, and moves committed anywhere
+else leave it unable to fast-forward.
+
+When validating a dev note, the question is not only whether the summary is good:
+
+- Does every link in **Sources** actually resolve, and go where the reel meant?
+- Is anything the creator only *said out loud* shown as `_unresolved_` with a
+  search link — rather than as a confident URL?
+
+The second one is the important one. The model is explicitly forbidden from
+producing URLs it did not see, because a fabricated `github.com/...` that 404s is
+worse than no link: nothing in the note tells a reader it was invented. If you
+ever find a made-up link in a note, that is a prompt bug worth fixing
+immediately, not a cosmetic one.
+
+Unresolved names are not a failure — they are a to-do list:
+
+```bash
+python scripts/vault_index.py reel-vault/reels --profile dev --sources
+```
+
+prints every link the vault cites, most-cited first, then the names it could not
+resolve.
+
+### 8e. Verify the safety mechanisms
 
 Worth doing once, so you know they work before you need them:
 
@@ -539,7 +601,7 @@ rather than root, which is what lets you edit them without `sudo`.
 **Update the stack**, then share a reel and confirm it lands on the host:
 
 ```bash
-ls -la /srv/reel-vault/reels | tail -3
+ls -la /srv/reel-vault/reels/*/ | tail -5
 ```
 
 New files should show your username, not `root`.
@@ -580,11 +642,14 @@ over SMB works but is happier with a local folder, so prefer Syncthing if you
 intend to edit heavily or use mobile.
 
 The notes are already Obsidian-shaped: YAML frontmatter, `tags:` as a real list,
-flat `reels/` directory. Tag search (`tag:#ads`) works with no configuration.
+one folder per profile under `reels/`. Tag search (`tag:#ads`) works with no
+configuration, and the folder pane separates the two niches without a query —
+which matters because the tag vocabularies are disjoint between profiles.
 
 > Editing notes by hand is fine — but leave the frontmatter alone. `shortcode`,
-> `prompt_version` and `tag_vocab_version` are how you find stale notes after the
-> extraction prompt changes. Edit the body freely.
+> `prompt_version` and `tag_vocab_version` are how you find stale notes after an
+> extraction prompt changes. Versions are counted per profile, so compare them
+> within one profile only (`--profile dev --stale 2`). Edit the body freely.
 
 ### 11c. Backup
 

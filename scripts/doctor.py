@@ -56,12 +56,19 @@ def _git():
 
 
 # --- config ---------------------------------------------------------------
-@check("tag vocabulary loads")
-def _tags():
-    from sme.config import Config, load_tags
+@check("profiles load")
+def _profiles():
+    from sme.config import Config, load_profiles
     cfg = Config.from_env(require_telegram=False, require_gemini=False)
-    t = load_tags(cfg.tags_file)
-    return len(t.names) > 0, f"v{t.version}, {len(t.names)} tags: {', '.join(t.names[:6])}…"
+    ps = load_profiles(cfg.profiles_dir)
+    detail = " · ".join(
+        f"{p.name} (v{p.version}/p{p.prompt_version}, {len(p.tags.names)} tags"
+        + (", sources" if p.has("references") else "") + ")"
+        for p in ps.values()
+    )
+    if cfg.default_profile not in ps:
+        return False, f"DEFAULT_PROFILE={cfg.default_profile} is not one of: {', '.join(ps)}"
+    return True, detail
 
 
 @check("data directories writable")

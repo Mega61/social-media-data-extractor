@@ -16,12 +16,13 @@ from pathlib import Path
 
 from google import genai
 
-from .config import Config, load_tags
+from .config import Config, load_profiles
 from .db import Queue
 from .downloader import PAUSING, DownloadError, download
-from .extractor import PROMPT_VERSION, ExtractionError, available_models, extract
+from .extractor import ExtractionError, available_models, extract
 from .notify import send
 from .render import note_filename, render, write_note
+from .resolver import resolve
 from .vault import chown_path, commit_note, ensure_repo, push
 
 log = logging.getLogger("sme.worker")
@@ -52,7 +53,7 @@ def is_quota_error(exc: Exception) -> bool:
 class Worker:
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.tags = load_tags(cfg.tags_file)
+        self.profiles = load_profiles(cfg.profiles_dir)
         self.q = Queue(cfg.db_path)
         self.client = genai.Client(api_key=cfg.gemini_api_key)
         self._last_prune = 0.0
@@ -66,6 +67,12 @@ class Worker:
             uid=cfg.vault_uid,
             gid=cfg.vault_gid,
         )
+        # One directory per profile, created up front rather than on first capture,
+        # so the folders are visible (and host-owned) in Obsidian from day one.
+        for name in self.profiles:
+            d = cfg.notes_dir_for(name)
+            d.mkdir(parents=True, exist_ok=True)
+            chown_path(d, cfg.vault_uid, cfg.vault_gid)
 
     # --- notification -----------------------------------------------------
     def notify(self, chat_id, text: str, *, silent: bool = False) -> None:
@@ -130,15 +137,28 @@ class Worker:
         log.info("[%s] downloaded %.1f MB from @%s", sc, dl.path.stat().st_size / 1e6, dl.uploader)
 
         self.q.set_stage(sc, "extracting")
-        data = extract(
+        ex = extract(
             dl.path,
             api_key=self.cfg.gemini_api_key,
             model=self.cfg.gemini_model,
-            tags=self.tags,
+            profiles=self.profiles,
             handle=dl.uploader,
             caption=dl.caption,
+            profile=job["profile"],
+            auto_route=self.cfg.auto_route,
+            default_profile=self.cfg.default_profile,
             client=self.client,
         )
+        data, profile = ex.data, ex.profile
+
+        # Names to URLs, offline and verified-only. Profiles without a references
+        # block get None, which is what keeps the Sources section off a marketing
+        # note rather than printing an empty one.
+        sources = resolve(
+            data.get("references") or [],
+            caption=dl.caption,
+            urls_seen=data.get("urls_seen") or [],
+        ) if profile.has("references") else None
 
         self.q.set_stage(sc, "writing")
         now = datetime.now(timezone.utc)
@@ -149,13 +169,18 @@ class Worker:
             handle=dl.uploader,
             captured_at=now,
             model=self.cfg.gemini_model,
-            prompt_version=PROMPT_VERSION,
-            tag_vocab_version=self.tags.version,
+            prompt_version=profile.prompt_version,
+            tag_vocab_version=profile.version,
+            profile=profile.name,
+            sources=sources,
             duration_s=dl.duration_s,
             published_at=dl.published_at,
         )
-        note = write_note(self.cfg.notes_dir, note_filename(now, dl.uploader, sc), content)
+        notes_dir = self.cfg.notes_dir_for(profile.name)
+        note = write_note(notes_dir, note_filename(now, dl.uploader, sc), content)
+        chown_path(notes_dir, self.cfg.vault_uid, self.cfg.vault_gid)
         chown_path(note, self.cfg.vault_uid, self.cfg.vault_gid)
+        rel = note.relative_to(self.cfg.notes_dir)
 
         commit_note(self.cfg.vault_dir, note, f"capture: @{dl.uploader} {sc}")
         if self.cfg.git_remote:
@@ -168,8 +193,13 @@ class Worker:
 
         tags = ", ".join(data.get("tags", []))
         flag = "" if data.get("has_usable_content", True) else " _(low signal)_"
-        self.notify(chat, f"*{data.get('title', sc)}*{flag}\n@{dl.uploader} · `{tags}`\n`{note.name}`")
-        log.info("[%s] done -> %s [%s]", sc, note.name, tags)
+        found = ""
+        if sources is not None:
+            hit = sum(1 for s in sources if s.get("url"))
+            found = f"\n{hit}/{len(sources)} sources linked" if sources else "\nno sources found"
+        self.notify(chat, f"*{data.get('title', sc)}*{flag}\n@{dl.uploader} · `{profile.name}` · `{tags}`"
+                          f"{found}\n`{rel}`")
+        log.info("[%s] done -> %s [%s/%s]", sc, rel, profile.name, tags)
 
     def fail(self, job, error_class: str, message: str) -> None:
         sc, chat = job["shortcode"], job["chat_id"]
@@ -236,10 +266,11 @@ class Worker:
         if reclaimed:
             log.info("reclaimed %d job(s) left running by a previous exit", reclaimed)
         log.info(
-            "worker up | model=%s cap=%d/day interval=%ds retention=%dd remote=%s",
-            self.cfg.gemini_model, self.cfg.download_daily_cap,
-            self.cfg.download_min_interval_s, self.cfg.media_retention_days,
-            self.cfg.git_remote or "(local only)",
+            "worker up | model=%s profiles=%s route=%s cap=%d/day interval=%ds retention=%dd remote=%s",
+            self.cfg.gemini_model, ",".join(self.profiles),
+            "auto" if self.cfg.auto_route else f"always {self.cfg.default_profile}",
+            self.cfg.download_daily_cap, self.cfg.download_min_interval_s,
+            self.cfg.media_retention_days, self.cfg.git_remote or "(local only)",
         )
         while not _stop:
             self.prune()
